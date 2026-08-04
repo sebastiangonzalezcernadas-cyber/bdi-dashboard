@@ -5,3 +5,6 @@ plotly
 gdown
 openpyxl
 holidays
+matplotlib
+jinja2
+
