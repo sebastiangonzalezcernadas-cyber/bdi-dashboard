@@ -262,6 +262,16 @@ DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2?usp=sharing"
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
 
+FILES_MAP = {
+    "1 Enero.xlsx": "1Y5RtUjO7pLCBuykQ8mmEr-0ELwotZxaB",
+    "2 Febrero.xlsx": "1YyTNAa3ZSG1H-zvxidPF46HkVhGbupoN",
+    "3 Marzo.xlsx": "1M4XeGzq1nlLUkoQxcywhAf6_GhDN2S1W",
+    "4 Abril.xlsx": "17RekvtYng_UyZFvfZHs-a4beaUDWL2ZH",
+    "5 Mayo.xlsx": "1LOeIJRu-VrS201ga9MjkuBTFBbPQ31on",
+    "6 Junio.xlsx": "1h3eHGaGU_92rGt2bYJTo-8DPvN6iUbMo",
+    "7 Julio.xlsx": "1Mfby1V47WVMDe864SpY4BNjatILbYZUz",
+}
+
 # -----------------------------------------------------------
 # TEMA APLICADO A TODOS LOS GRÁFICOS
 # -----------------------------------------------------------
@@ -373,12 +383,19 @@ def extract_tier(tag_str):
 def cargar_datos_drive():
     output_dir = "./data_drive"
     os.makedirs(output_dir, exist_ok=True)
+
+    # 1. Descarga directa por ID de cada archivo (100% inmune a bloqueos de carpetas)
+    for filename, file_id in FILES_MAP.items():
+        file_path = os.path.join(output_dir, filename)
+        if not os.path.exists(file_path):
+            try:
+                gdown.download(id=file_id, output=file_path, quiet=True)
+            except Exception:
+                pass
+
+    # 2. Descarga por carpeta
     try:
         gdown.download_folder(id=DRIVE_FOLDER_ID, output=output_dir, quiet=True, remaining_ok=True)
-    except Exception:
-        pass
-    try:
-        gdown.download_folder(url=DRIVE_FOLDER_URL, output=output_dir, quiet=True, remaining_ok=True)
     except Exception:
         pass
 
@@ -423,10 +440,28 @@ def cargar_datos_drive():
 
 st.sidebar.markdown("### ⚙️ Panel de Control")
 st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=st.cache_data.clear, use_container_width=True)
+
+# Opción extra: Cargar archivo manualmente directamente en el navegador
+uploaded_files = st.sidebar.file_uploader("📂 O subir planilla .xlsx manualmente:", type=["xlsx"], accept_multiple_files=True)
+
 df_raw = cargar_datos_drive()
 
+if uploaded_files:
+    dfs_up = []
+    for up_file in uploaded_files:
+        try:
+            dfs_up.append(pd.read_excel(up_file))
+        except Exception:
+            pass
+    if dfs_up:
+        df_uploaded = pd.concat(dfs_up, ignore_index=True)
+        if not df_raw.empty:
+            df_raw = pd.concat([df_raw, df_uploaded], ignore_index=True).drop_duplicates()
+        else:
+            df_raw = df_uploaded
+
 if df_raw.empty:
-    st.error("No se encontraron datos para procesar. Verifique que la carpeta de Google Drive 'Whaticket 2026' tenga acceso público ('Cualquiera con el enlace puede ver').")
+    st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive o suba los archivos .xlsx mediante la opción del panel lateral.")
     st.stop()
 
 # ---------------------------------------------------------
@@ -1007,6 +1042,4 @@ with tab5:
         st.plotly_chart(fig_comp_t, use_container_width=True)
 
     st.caption("🟡 La línea punteada dorada marca el promedio del grupo — útil para identificar rápidamente quién está por encima o por debajo del estándar.")
-
-
 
