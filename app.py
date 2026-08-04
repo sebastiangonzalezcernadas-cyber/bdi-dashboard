@@ -799,7 +799,7 @@ with tab4:
             'Participación (%)': '{:.1f}%', 'FRT Mediano (Min)': '{:.1f}',
             'Chats / Día': '{:.1f}', 'Chats / Hora (8hs)': '{:.1f}',
             'Nuevos Contactos (%)': '{:.1f}%'
-        }).background_gradient(subset=['Total Chats'], cmap='Greens'),
+        }),
         column_config={
             "FRT Mediano (Min)": st.column_config.NumberColumn(help="First Response Time: minutos que tarda el asesor en responder el primer mensaje."),
             "Chats / Día": st.column_config.NumberColumn(help="Total de chats dividido la cantidad de días hábiles (Lun a Vie) descontando feriados."),
