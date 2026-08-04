@@ -258,7 +258,8 @@ DAY_MAP = {
     'Thursday': 'Jueves', 'Friday': 'Viernes', 'Saturday': 'Sábado', 'Sunday': 'Domingo'
 }
 DAY_ORDER_LABORAL = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes']
-DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
+DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
+DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2?usp=sharing"
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
 
 # -----------------------------------------------------------
@@ -373,6 +374,10 @@ def cargar_datos_drive():
     output_dir = "./data_drive"
     os.makedirs(output_dir, exist_ok=True)
     try:
+        gdown.download_folder(id=DRIVE_FOLDER_ID, output=output_dir, quiet=True, remaining_ok=True)
+    except Exception:
+        pass
+    try:
         gdown.download_folder(url=DRIVE_FOLDER_URL, output=output_dir, quiet=True, remaining_ok=True)
     except Exception:
         pass
@@ -421,7 +426,7 @@ st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=st.cache_da
 df_raw = cargar_datos_drive()
 
 if df_raw.empty:
-    st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive.")
+    st.error("No se encontraron datos para procesar. Verifique que la carpeta de Google Drive 'Whaticket 2026' tenga acceso público ('Cualquiera con el enlace puede ver').")
     st.stop()
 
 # ---------------------------------------------------------
@@ -1002,4 +1007,6 @@ with tab5:
         st.plotly_chart(fig_comp_t, use_container_width=True)
 
     st.caption("🟡 La línea punteada dorada marca el promedio del grupo — útil para identificar rápidamente quién está por encima o por debajo del estándar.")
+
+
 
