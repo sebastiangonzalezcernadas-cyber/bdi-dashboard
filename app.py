@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import glob
+import shutil
 import gdown
 import holidays
 from datetime import datetime
@@ -219,6 +220,11 @@ st.markdown("""
         border-radius: 8px !important;
         border: 1px solid #D3DED8 !important;
     }
+
+    /* --------------------- CAPTIONS --------------------- */
+    .stCaption, [data-testid="stCaptionContainer"] p {
+        color: #5B6E67 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -261,16 +267,6 @@ DAY_ORDER_LABORAL = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes']
 DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2?usp=sharing"
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
-
-FILES_MAP = {
-    "1 Enero.xlsx": "1Y5RtUjO7pLCBuykQ8mmEr-0ELwotZxaB",
-    "2 Febrero.xlsx": "1YyTNAa3ZSG1H-zvxidPF46HkVhGbupoN",
-    "3 Marzo.xlsx": "1M4XeGzq1nlLUkoQxcywhAf6_GhDN2S1W",
-    "4 Abril.xlsx": "17RekvtYng_UyZFvfZHs-a4beaUDWL2ZH",
-    "5 Mayo.xlsx": "1LOeIJRu-VrS201ga9MjkuBTFBbPQ31on",
-    "6 Junio.xlsx": "1h3eHGaGU_92rGt2bYJTo-8DPvN6iUbMo",
-    "7 Julio.xlsx": "1Mfby1V47WVMDe864SpY4BNjatILbYZUz",
-}
 
 # -----------------------------------------------------------
 # TEMA APLICADO A TODOS LOS GRÁFICOS
@@ -379,29 +375,31 @@ def extract_tier(tag_str):
         if any(tier.lower() in t.lower() for t in tags): return tier
     return 'Sin Etiqueta Monto'
 
+
 @st.cache_data(ttl=1800)
 def cargar_datos_drive():
+    """
+    Descarga siempre una copia fresca de todos los .xlsx de la carpeta de Drive.
+    Se borra el directorio local antes de descargar para evitar quedarse con
+    archivos viejos (por ejemplo, si se borró un Excel en Drive y se subió
+    uno nuevo con otro ID interno pero el mismo nombre).
+    """
     output_dir = "./data_drive"
+
+    # Limpieza total del directorio local antes de sincronizar
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir, ignore_errors=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Descarga directa por ID de cada archivo (100% inmune a bloqueos de carpetas)
-    for filename, file_id in FILES_MAP.items():
-        file_path = os.path.join(output_dir, filename)
-        if not os.path.exists(file_path):
-            try:
-                gdown.download(id=file_id, output=file_path, quiet=True)
-            except Exception:
-                pass
-
-    # 2. Descarga por carpeta
+    # Descarga de la carpeta completa de Drive (siempre trae el contenido actual)
     try:
         gdown.download_folder(id=DRIVE_FOLDER_ID, output=output_dir, quiet=True, remaining_ok=True)
     except Exception:
         pass
 
-    all_files = glob.glob(os.path.join(output_dir, "*.xlsx")) + glob.glob("*.xlsx")
-    all_files = list(set(all_files))
-    if not all_files: return pd.DataFrame()
+    all_files = glob.glob(os.path.join(output_dir, "**", "*.xlsx"), recursive=True)
+    if not all_files:
+        return pd.DataFrame()
 
     dfs = []
     for file in sorted(all_files):
@@ -438,8 +436,15 @@ def cargar_datos_drive():
 
     return df
 
+
+def sincronizar_datos():
+    """Limpia el caché y fuerza una nueva descarga desde Drive en el próximo rerun."""
+    st.cache_data.clear()
+
+
 st.sidebar.markdown("### ⚙️ Panel de Control")
-st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=st.cache_data.clear, use_container_width=True)
+st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=sincronizar_datos, use_container_width=True)
+st.sidebar.caption("Usá este botón cada vez que agregues, borres o reemplaces archivos en la carpeta de Drive. Recargar la página (F5) no alcanza para traer los datos nuevos.")
 
 # Opción extra: Cargar archivo manualmente directamente en el navegador
 uploaded_files = st.sidebar.file_uploader("📂 O subir planilla .xlsx manualmente:", type=["xlsx"], accept_multiple_files=True)
@@ -1042,4 +1047,3 @@ with tab5:
         st.plotly_chart(fig_comp_t, use_container_width=True)
 
     st.caption("🟡 La línea punteada dorada marca el promedio del grupo — útil para identificar rápidamente quién está por encima o por debajo del estándar.")
-
