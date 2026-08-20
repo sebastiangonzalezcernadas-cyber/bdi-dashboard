@@ -169,7 +169,6 @@ NOMBRE_A_NUM = {
 
 DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
 
-# Catálogo directo de IDs de los 8 archivos actuales en Google Drive
 ARCHIVOS_DRIVE_DIRECTOS = {
     '1 Enero.xlsx': '1zFNQvWpxMwlU_E-18WsTjsVa-E-14MkH',
     '2 Febrero.xlsx': '1unvZXggYzOB-xe-N1CeoYHTMz0QssfSj',
@@ -263,11 +262,9 @@ def extract_month_from_filename(filename):
 # -----------------------------------------------------------
 # CARGA Y DESCARGA DINÁMICA DE DATOS
 # -----------------------------------------------------------
-@st.cache_data(ttl=300)
+@st.cache_data
 def cargar_datos_drive():
     output_dir = "./data_drive"
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir, ignore_errors=True)
     os.makedirs(output_dir, exist_ok=True)
 
     archivos_a_descargar = dict(ARCHIVOS_DRIVE_DIRECTOS)
@@ -294,10 +291,10 @@ def cargar_datos_drive():
             pass
 
     for fname, fid in archivos_a_descargar.items():
-        # Limpiamos caracteres reservados para el nombre local de archivo
         safe_name = fname.replace('/', '_')
         filepath = os.path.join(output_dir, safe_name)
-        if not os.path.exists(filepath):
+        # Solo descarga si el archivo no existe localmente o pesa menos de 10KB (evita saturar Google Drive)
+        if not os.path.exists(filepath) or os.path.getsize(filepath) < 10000:
             try:
                 gdown.download(id=fid, output=filepath, quiet=True)
             except Exception:
@@ -310,10 +307,11 @@ def cargar_datos_drive():
     dfs = []
     for file in sorted(all_files):
         try:
-            df_temp = pd.read_excel(file)
-            df_temp['archivo_origen'] = os.path.basename(file)
-            df_temp['mes_archivo'] = extract_month_from_filename(file)
-            dfs.append(df_temp)
+            if os.path.getsize(file) > 10000:
+                df_temp = pd.read_excel(file)
+                df_temp['archivo_origen'] = os.path.basename(file)
+                df_temp['mes_archivo'] = extract_month_from_filename(file)
+                dfs.append(df_temp)
         except Exception:
             continue
 
@@ -352,8 +350,13 @@ def cargar_datos_drive():
 # ---------------------------------------------------------
 st.sidebar.markdown("### ⚙️ Panel de Control")
 
-if st.sidebar.button("🔄 Sincronizar datos de Google Drive", use_container_width=True):
+def forzar_sincronizacion():
+    output_dir = "./data_drive"
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir, ignore_errors=True)
     st.cache_data.clear()
+
+if st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=forzar_sincronizacion, use_container_width=True):
     st.rerun()
 
 uploaded_files = st.sidebar.file_uploader("📂 O cargar planilla .xlsx manualmente:", type=["xlsx"], accept_multiple_files=True)
@@ -395,7 +398,6 @@ if df_raw.empty:
     st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive o cargue los archivos manualmente.")
     st.stop()
 
-# Feedback de archivos cargados
 archivos_cargados = df_raw['archivo_origen'].dropna().unique()
 st.sidebar.success(f"📁 **{len(archivos_cargados)} planillas procesadas**")
 with st.sidebar.expander("📄 Ver archivos detectados"):
