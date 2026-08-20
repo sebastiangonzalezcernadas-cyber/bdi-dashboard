@@ -8,6 +8,7 @@ import glob
 import shutil
 import re
 import gdown
+import io
 import holidays
 from datetime import datetime
 
@@ -168,6 +169,19 @@ NOMBRE_A_NUM = {
 }
 
 DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
+
+# Catálogo de archivos conocidos con sus IDs directos en Drive
+ARCHIVOS_DRIVE_DIRECTOS = {
+    '1 Enero.xlsx': '1zFNQvWpxMwlU_E-18WsTjsVa-E-14MkH',
+    '2 Febrero.xlsx': '1unvZXggYzOB-xe-N1CeoYHTMz0QssfSj',
+    '3 Marzo.xlsx': '1IUnaC_s51MHd2609yfcpUaxMhPcScxkp',
+    '4 Abril.xlsx': '17Mmdng_JeNPXgHcOYlLK_2Edj8d3BQBt',
+    '5 Mayo.xlsx': '1fkDQJejM25KzwiApnmRat_-IqdgKrdE0',
+    '6 Junio.xlsx': '1ZBNevn_X5nBDQDBjHc7HrM1EaYQp2yn1',
+    '7 Julio.xlsx': '1M_Ydu3-UGkcV8epF5UzjTLkXr03Jh6Gn',
+    '8 Agosto (20/08).xlsx': '1VfXGVcWD9bfJrEYAALylDpyNqU1RizxM'
+}
+
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
 
 # -----------------------------------------------------------
@@ -257,11 +271,37 @@ def cargar_datos_drive():
         shutil.rmtree(output_dir, ignore_errors=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    try:
-        folder_url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
-        gdown.download_folder(url=folder_url, output=output_dir, quiet=True, use_cookies=False, remaining_ok=True)
-    except Exception:
-        pass
+    archivos_a_descargar = dict(ARCHIVOS_DRIVE_DIRECTOS)
+
+    # Si el usuario configuró Google Service Account en st.secrets, lista todos los archivos en vivo
+    if "gcp_service_account" in st.secrets:
+        try:
+            from google.oauth2 import service_account
+            from googleapiclient.discovery import build
+            creds = service_account.Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"],
+                scopes=['https://www.googleapis.com/auth/drive.readonly']
+            )
+            service = build('drive', 'v3', credentials=creds)
+            results = service.files().list(
+                q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+                fields="files(id, name)"
+            ).execute()
+            items = results.get('files', [])
+            for item in items:
+                if item['name'].endswith('.xlsx'):
+                    archivos_a_descargar[item['name']] = item['id']
+        except Exception:
+            pass
+
+    # Descarga individual por ID
+    for fname, fid in archivos_a_descargar.items():
+        filepath = os.path.join(output_dir, fname)
+        if not os.path.exists(filepath):
+            try:
+                gdown.download(id=fid, output=filepath, quiet=True)
+            except Exception:
+                pass
 
     all_files = glob.glob(os.path.join(output_dir, "**", "*.xlsx"), recursive=True)
     if not all_files:
@@ -287,7 +327,7 @@ def cargar_datos_drive():
 
     df['fecha_corta'] = df['createdAt_dt'].dt.date
     
-    # Asignación del mes cronológico
+    # Asignación del mes cronológico (01 - Enero, 02 - Febrero, etc.)
     df['mes_nombre'] = df['createdAt_dt'].dt.month.map(MESES_ES_MAP)
     df['mes_nombre'] = df['mes_nombre'].fillna(df['mes_archivo'])
 
