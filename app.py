@@ -8,7 +8,6 @@ import glob
 import shutil
 import re
 import gdown
-import io
 import holidays
 from datetime import datetime
 
@@ -134,7 +133,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# CONSTANTES Y MAPEOS
+# CONSTANTES Y PALETAS DE COLORES
 # ---------------------------------------------------------
 USER_COLORS = {
     'Ruso': '#157347', 'Harry': '#2FA66B', 'BDI': '#3AAFB9',
@@ -170,7 +169,7 @@ NOMBRE_A_NUM = {
 
 DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
 
-# Catálogo de archivos conocidos con sus IDs directos en Drive
+# Catálogo directo de IDs de los 8 archivos actuales en Google Drive
 ARCHIVOS_DRIVE_DIRECTOS = {
     '1 Enero.xlsx': '1zFNQvWpxMwlU_E-18WsTjsVa-E-14MkH',
     '2 Febrero.xlsx': '1unvZXggYzOB-xe-N1CeoYHTMz0QssfSj',
@@ -250,11 +249,11 @@ def extract_tier(tag_str):
     return 'Sin Etiqueta Monto'
 
 def extract_month_from_filename(filename):
-    fn = os.path.basename(filename).lower()
+    fn = str(filename).lower()
     for name, num in NOMBRE_A_NUM.items():
         if name in fn:
             return MESES_ES_MAP[num]
-    match = re.search(r'^\s*(\d{1,2})[\s_-]', fn)
+    match = re.search(r'(\b\d{1,2}\b)', fn)
     if match:
         num = int(match.group(1))
         if 1 <= num <= 12:
@@ -273,7 +272,7 @@ def cargar_datos_drive():
 
     archivos_a_descargar = dict(ARCHIVOS_DRIVE_DIRECTOS)
 
-    # Si el usuario configuró Google Service Account en st.secrets, lista todos los archivos en vivo
+    # Si se configuró Service Account en st.secrets, consulta la carpeta en vivo
     if "gcp_service_account" in st.secrets:
         try:
             from google.oauth2 import service_account
@@ -294,9 +293,10 @@ def cargar_datos_drive():
         except Exception:
             pass
 
-    # Descarga individual por ID
     for fname, fid in archivos_a_descargar.items():
-        filepath = os.path.join(output_dir, fname)
+        # Limpiamos caracteres reservados para el nombre local de archivo
+        safe_name = fname.replace('/', '_')
+        filepath = os.path.join(output_dir, safe_name)
         if not os.path.exists(filepath):
             try:
                 gdown.download(id=fid, output=filepath, quiet=True)
@@ -327,7 +327,7 @@ def cargar_datos_drive():
 
     df['fecha_corta'] = df['createdAt_dt'].dt.date
     
-    # Asignación del mes cronológico (01 - Enero, 02 - Febrero, etc.)
+    # Asignación de mes cronológico
     df['mes_nombre'] = df['createdAt_dt'].dt.month.map(MESES_ES_MAP)
     df['mes_nombre'] = df['mes_nombre'].fillna(df['mes_archivo'])
 
@@ -356,7 +356,7 @@ if st.sidebar.button("🔄 Sincronizar datos de Google Drive", use_container_wid
     st.cache_data.clear()
     st.rerun()
 
-uploaded_files = st.sidebar.file_uploader("📂 O cargar planilla .xlsx:", type=["xlsx"], accept_multiple_files=True)
+uploaded_files = st.sidebar.file_uploader("📂 O cargar planilla .xlsx manualmente:", type=["xlsx"], accept_multiple_files=True)
 
 df_raw = cargar_datos_drive()
 
@@ -392,10 +392,10 @@ if uploaded_files:
             df_raw = df_uploaded
 
 if df_raw.empty:
-    st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive o cargue los archivos manualmente en el panel lateral.")
+    st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive o cargue los archivos manualmente.")
     st.stop()
 
-# Feedback de archivos detectados
+# Feedback de archivos cargados
 archivos_cargados = df_raw['archivo_origen'].dropna().unique()
 st.sidebar.success(f"📁 **{len(archivos_cargados)} planillas procesadas**")
 with st.sidebar.expander("📄 Ver archivos detectados"):
@@ -422,7 +422,7 @@ if asesores_sel: df = df[df['user'].isin(asesores_sel)]
 st.markdown(f"""
 <div class="bdi-header">
     <h1>📈 Dashboard de Gestión de Mensajería</h1>
-    <p>BDI Consultora — Consolidado analítico de conversaciones, rendimiento operativo y distribución patrimonial.</p>
+    <p>BDI Consultora — Consolidado analítico de conversaciones, rendimiento operativo por asesor y distribución patrimonial.</p>
     <span class="bdi-badge">Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}</span>
 </div>
 """, unsafe_allow_html=True)
@@ -515,6 +515,7 @@ with tab2:
         )
         fig_broker.update_traces(textinfo='percent', textposition='inside')
         fig_broker = apply_bdi_theme(fig_broker, legend_below=True)
+        fig_broker.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_broker, use_container_width=True)
 
     with col_b2:
@@ -528,6 +529,7 @@ with tab2:
         )
         fig_tier.update_traces(textinfo='percent', textposition='inside')
         fig_tier = apply_bdi_theme(fig_tier, legend_below=True)
+        fig_tier.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_tier, use_container_width=True)
 
     divider()
@@ -544,6 +546,7 @@ with tab2:
         )
         fig_broker_filt.update_traces(textinfo='percent', textposition='inside')
         fig_broker_filt = apply_bdi_theme(fig_broker_filt, legend_below=True)
+        fig_broker_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_broker_filt, use_container_width=True)
 
     with col_b4:
@@ -557,7 +560,63 @@ with tab2:
         )
         fig_tier_filt.update_traces(textinfo='percent', textposition='inside')
         fig_tier_filt = apply_bdi_theme(fig_tier_filt, legend_below=True)
+        fig_tier_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_tier_filt, use_container_width=True)
+
+    divider()
+
+    section_header("ALCANCE REAL", "Análisis Basado en Usuarios Únicos")
+    col_b5, col_b6 = st.columns(2)
+    with col_b5:
+        unique_brokers = df_exp[df_exp['brokers'] != 'Sin Broker'].drop_duplicates(subset=['contactNumber', 'brokers'])
+        broker_users = unique_brokers['brokers'].value_counts().reset_index()
+        broker_users.columns = ['Broker', 'Usuarios_Unicos']
+        fig_broker_usr = px.pie(
+            broker_users, values='Usuarios_Unicos', names='Broker', hole=0.45,
+            color='Broker', color_discrete_map=BROKER_COLORS,
+            title="Personas Únicas Atendidas por Broker"
+        )
+        fig_broker_usr.update_traces(textinfo='percent', textposition='inside')
+        fig_broker_usr = apply_bdi_theme(fig_broker_usr, legend_below=True)
+        fig_broker_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
+        st.plotly_chart(fig_broker_usr, use_container_width=True)
+
+    with col_b6:
+        unique_tiers = df[df['tier'] != 'Sin Etiqueta Monto'].drop_duplicates(subset=['contactNumber', 'tier'])
+        tier_users = unique_tiers['tier'].value_counts().reset_index()
+        tier_users.columns = ['Segmento', 'Usuarios_Unicos']
+        fig_tier_usr = px.pie(
+            tier_users, values='Usuarios_Unicos', names='Segmento', hole=0.45,
+            color='Segmento', color_discrete_map=TIER_COLORS,
+            title="Personas Únicas Atendidas por Patrimonio",
+            category_orders={'Segmento': TIERS}
+        )
+        fig_tier_usr.update_traces(textinfo='percent', textposition='inside')
+        fig_tier_usr = apply_bdi_theme(fig_tier_usr, legend_below=True)
+        fig_tier_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
+        st.plotly_chart(fig_tier_usr, use_container_width=True)
+
+    divider()
+
+    section_header("COMPOSICIÓN CRUZADA", "Brokers vs. Segmentos Patrimoniales")
+    df_tier_broker = df_exp[df_exp['tier'] != 'Sin Etiqueta Monto'].groupby(['brokers', 'tier']).size().reset_index(name='Chats')
+    totals = df_tier_broker.groupby('brokers')['Chats'].transform('sum')
+    df_tier_broker['Porcentaje'] = (df_tier_broker['Chats'] / totals * 100).round(1)
+    df_tier_broker['Texto'] = df_tier_broker['Chats'].astype(str) + " (" + df_tier_broker['Porcentaje'].astype(str) + "%)"
+
+    fig_tier_broker = px.bar(
+        df_tier_broker, x='Chats', y='brokers', color='tier',
+        barmode='group', orientation='h', text='Texto',
+        category_orders={'tier': TIERS}, color_discrete_map=TIER_COLORS,
+        title="Volumen de Consultas Patrimoniales por Broker"
+    )
+    fig_tier_broker.update_traces(textposition='outside', cliponaxis=False)
+    fig_tier_broker = apply_bdi_theme(fig_tier_broker, legend_below=True)
+    fig_tier_broker.update_layout(
+        xaxis_title="Cantidad de Chats", yaxis_title="Broker", legend_title="Segmento (USD)",
+        height=780, margin=dict(t=60, b=90, l=60, r=60)
+    )
+    st.plotly_chart(fig_tier_broker, use_container_width=True)
 
 # ---------------------------------------------------------
 # TAB 3: CLIENTES
@@ -585,6 +644,18 @@ with tab3:
     divider()
 
     section_header("BASE DE CLIENTES", "Listado Completo e Interactivo")
+
+    # Pareto 80/20
+    df_pareto = df_clients_all.sort_values('Total_Chats', ascending=False)
+    total_chats_pareto = df_pareto['Total_Chats'].sum()
+    if total_chats_pareto > 0:
+        df_pareto['CumSum'] = df_pareto['Total_Chats'].cumsum()
+        df_pareto['CumPct'] = df_pareto['CumSum'] / total_chats_pareto
+        pareto_80_idx = df_pareto[df_pareto['CumPct'] <= 0.8].shape[0]
+        if pareto_80_idx == 0: pareto_80_idx = 1
+        pareto_client_pct = (pareto_80_idx / len(df_pareto)) * 100
+        st.info(f"💡 **Concentración de la Demanda (Ley de Pareto):** El **{pareto_client_pct:.1f}%** de los clientes ({pareto_80_idx} de {len(df_pareto)}) genera el 80% del volumen total de chats.")
+
     search_query = st.text_input("🔍 Buscador de clientes (nombre o número telefónico):", "")
     df_filtered_clients = df_clients_all.copy().sort_values('Total_Chats', ascending=False)
 
@@ -647,12 +718,20 @@ with tab4:
     df_table_eff.columns = ['Asesor', 'Total Chats', 'Participación (%)', 'FRT Mediano (Min)',
                             'Chats / Día', 'Chats / Hora (8hs)', 'Nuevos Contactos (#)', 'Nuevos Contactos (%)']
 
+    st.markdown("##### Resumen de Métricas de Agilidad, Volumen y Calidad")
     st.dataframe(
         df_table_eff.style.format({
             'Participación (%)': '{:.1f}%', 'FRT Mediano (Min)': '{:.1f}',
             'Chats / Día': '{:.1f}', 'Chats / Hora (8hs)': '{:.1f}',
             'Nuevos Contactos (%)': '{:.1f}%'
         }),
+        column_config={
+            "FRT Mediano (Min)": st.column_config.NumberColumn(help="First Response Time: minutos que tarda el asesor en responder el primer mensaje."),
+            "Chats / Día": st.column_config.NumberColumn(help="Total de chats dividido la cantidad de días hábiles descontando feriados."),
+            "Chats / Hora (8hs)": st.column_config.NumberColumn(help="Promedio diario dividido las 8 horas de jornada laboral."),
+            "Nuevos Contactos (#)": st.column_config.NumberColumn(help="Cantidad absoluta de nuevos clientes."),
+            "Nuevos Contactos (%)": st.column_config.NumberColumn(help="Porcentaje de clientes que escribieron por primera vez.")
+        },
         use_container_width=True, hide_index=True
     )
 
@@ -668,6 +747,7 @@ with tab4:
         )
         fig_pie.update_traces(textinfo='percent', textposition='inside')
         fig_pie = apply_bdi_theme(fig_pie, legend_below=True)
+        fig_pie.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_pie, use_container_width=True)
 
     with col_u2:
@@ -679,8 +759,90 @@ with tab4:
         )
         fig_frt.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
         fig_frt = apply_bdi_theme(fig_frt)
-        fig_frt.update_layout(showlegend=False, xaxis_title="Minutos", yaxis_title="")
+        fig_frt.update_layout(showlegend=False, xaxis_title="Minutos", yaxis_title="", margin=dict(t=60, b=40, l=100, r=60))
         st.plotly_chart(fig_frt, use_container_width=True)
+
+    divider()
+
+    section_header("PATRIMONIO", "Distribución de Cartera por Asesor")
+    df_user_tier = df[df['tier'] != 'Sin Etiqueta Monto']
+    asesores_activos = df_user_tier['user'].dropna().unique()
+
+    if len(asesores_activos) > 0:
+        cols_pie = st.columns(3)
+        for idx, asesor in enumerate(asesores_activos):
+            df_as = df_user_tier[df_user_tier['user'] == asesor].groupby('tier').size().reset_index(name='Chats')
+            fig_p = px.pie(
+                df_as, names='tier', values='Chats',
+                title=f"Asesor: {asesor}",
+                color='tier', color_discrete_map=TIER_COLORS, hole=0.35
+            )
+            fig_p.update_traces(textinfo='percent', textposition='inside')
+            fig_p = apply_bdi_theme(fig_p)
+            fig_p.update_layout(
+                showlegend=False,
+                margin=dict(t=45, b=15, l=30, r=30),
+                title_font=dict(color='#0F5132', size=15)
+            )
+            cols_pie[idx % 3].plotly_chart(fig_p, use_container_width=True)
+        st.caption("💡 Pasá el cursor sobre cada porción para ver el detalle exacto por segmento y asesor.")
+    else:
+        st.info("No hay datos de patrimonio etiquetados para mostrar bajo los filtros actuales.")
+
+    divider()
+
+    section_header("SATURACIÓN", "Picos de Actividad por Día y Hora")
+    st.caption("Excluye fines de semana · Horario comercial (8 a 18 hs) · El color indica volumen absoluto; el porcentaje, el peso relativo del día.")
+
+    df_heatmap = df[(df['hora'] >= 8) & (df['hora'] <= 18) & (~df['dia_semana'].isin(['Sábado', 'Domingo']))]
+
+    if not df_heatmap.empty:
+        heatmap_counts = df_heatmap.groupby(['dia_semana', 'hora']).size().reset_index(name='Chats')
+        totals_per_day = heatmap_counts.groupby('dia_semana')['Chats'].transform('sum')
+        heatmap_counts['Porcentaje'] = (heatmap_counts['Chats'] / totals_per_day * 100).round(1)
+
+        heatmap_data = heatmap_counts.pivot(index='dia_semana', columns='hora', values='Chats').reindex(DAY_ORDER_LABORAL).fillna(0)
+        heatmap_pct = heatmap_counts.pivot(index='dia_semana', columns='hora', values='Porcentaje').reindex(DAY_ORDER_LABORAL).fillna(0)
+
+        z = heatmap_data.values
+        zmax = z.max() if z.max() > 0 else 1
+
+        fig_heatmap = go.Figure(data=go.Heatmap(
+            z=z,
+            x=[f"{h:02d}:00" for h in heatmap_data.columns],
+            y=heatmap_data.index,
+            colorscale=[[0, '#F4F9F6'], [0.5, '#8FBF74'],],
+            colorbar=dict(title="Chats", thickness=14, len=0.8),
+            hovertemplate="<b>%{y}, %{x}</b><br>Chats: %{z}<extra></extra>",
+            zmin=0, zmax=zmax
+        ))
+
+        annotations = []
+        for i, day in enumerate(heatmap_data.index):
+            for j, hour in enumerate(heatmap_data.columns):
+                val = z[i][j]
+                pct = heatmap_pct.values[i][j]
+                intensity = val / zmax if zmax > 0 else 0
+                text_color = '#FFFFFF' if intensity > 0.55 else '#1A252C'
+                annotations.append(dict(
+                    x=f"{hour:02d}:00", y=day,
+                    text=f"<b>{int(val)}</b><br>{pct:.0f}%",
+                    showarrow=False,
+                    font=dict(color=text_color, size=10.5),
+                    align="center"
+                ))
+        fig_heatmap.update_layout(annotations=annotations)
+        fig_heatmap.update_xaxes(title="Hora del día", side="bottom")
+        fig_heatmap.update_yaxes(title="Día de la semana")
+        fig_heatmap = apply_bdi_theme(fig_heatmap)
+        fig_heatmap.update_layout(
+            title=dict(text="Distribución de Carga de Trabajo (Horario Comercial)", font=dict(color='#0F5132', size=17), x=0.01),
+            height=420,
+            margin=dict(t=60, b=50, l=110, r=40)
+        )
+        st.plotly_chart(fig_heatmap, use_container_width=True)
+    else:
+        st.info("No hay chats registrados en horario comercial para la selección actual.")
 
 # ---------------------------------------------------------
 # TAB 5: FRICCIÓN Y COMPLEJIDAD
@@ -704,12 +866,17 @@ with tab5:
     segmento_mas_lento = df_tier_frt_kpi.idxmax() if not df_tier_frt_kpi.empty else "—"
 
     kf1, kf2, kf3, kf4 = st.columns(4)
-    kf1.metric("Ratio Global de Fricción", f"{ratio_global:.2f} chats/cliente" if pd.notna(ratio_global) else "s/d")
-    kf2.metric("Resolución Promedio", f"{res_time_prom:.0f} min" if pd.notna(res_time_prom) else "s/d")
-    kf3.metric("Broker Más Dependiente", broker_mas_dependiente)
-    kf4.metric("Segmento Más Lento (FRT)", segmento_mas_lento)
+    kf1.metric("Ratio Global de Fricción", f"{ratio_global:.2f} chats/cliente" if pd.notna(ratio_global) else "s/d", help="Promedio de chats por cliente único.")
+    kf2.metric("Resolución Promedio", f"{res_time_prom:.0f} min" if pd.notna(res_time_prom) else "s/d", help="Tiempo promedio de resolución en horario laboral.")
+    kf3.metric("Broker Más Dependiente", broker_mas_dependiente, help="Broker con mayor promedio de consultas por cliente.")
+    kf4.metric("Segmento Más Lento (FRT)", segmento_mas_lento, help="Segmento patrimonial con la mediana de respuesta inicial más lenta.")
 
     divider()
+
+    section_header(
+        "FRICCIÓN", "Índice de Independencia del Cliente",
+        subtitle="Cuántas veces nos vuelve a escribir un mismo cliente único. Un ratio menor indica mayor autonomía."
+    )
 
     col_f1, col_f2 = st.columns(2)
     with col_f1:
@@ -726,6 +893,7 @@ with tab5:
         fig_fric_b.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
         fig_fric_b = add_reference_line(fig_fric_b, df_fric_broker['Ratio'].mean(), orientation='v')
         fig_fric_b = apply_bdi_theme(fig_fric_b)
+        fig_fric_b.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Broker", showlegend=False)
         st.plotly_chart(fig_fric_b, use_container_width=True)
 
     with col_f2:
@@ -742,4 +910,44 @@ with tab5:
         fig_fric_t.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
         fig_fric_t = add_reference_line(fig_fric_t, df_fric_tier['Ratio'].mean(), orientation='v')
         fig_fric_t = apply_bdi_theme(fig_fric_t)
+        fig_fric_t.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Segmento Patrimonial", showlegend=False)
         st.plotly_chart(fig_fric_t, use_container_width=True)
+
+    divider()
+
+    section_header(
+        "COMPLEJIDAD OPERATIVA", "Análisis de Tiempos de Atención (SLA)",
+        subtitle="Cruza tiempos de resolución y de primera respuesta con plataformas y patrimonio."
+    )
+
+    col_c1, col_c2 = st.columns(2)
+    with col_c1:
+        df_comp_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers')['res_time_wh_min'].mean().reset_index()
+
+        fig_comp_b = px.bar(
+            df_comp_broker.sort_values('res_time_wh_min', ascending=True),
+            x='res_time_wh_min', y='brokers', orientation='h', text='res_time_wh_min',
+            color='brokers', color_discrete_map=BROKER_COLORS,
+            title="Tiempo Promedio de Resolución por Broker"
+        )
+        fig_comp_b.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
+        fig_comp_b = add_reference_line(fig_comp_b, df_comp_broker['res_time_wh_min'].mean(), orientation='v')
+        fig_comp_b = apply_bdi_theme(fig_comp_b)
+        fig_comp_b.update_layout(xaxis_title="Minutos Promedio en Horario Laboral", yaxis_title="Broker", showlegend=False)
+        st.plotly_chart(fig_comp_b, use_container_width=True)
+
+    with col_c2:
+        df_comp_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median().reset_index()
+
+        fig_comp_t = px.bar(
+            df_comp_tier, x='FRT_min', y='tier', orientation='h', text='FRT_min',
+            color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+            title="SLA de Facto: FRT Mediano por Patrimonio"
+        )
+        fig_comp_t.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
+        fig_comp_t = add_reference_line(fig_comp_t, df_comp_tier['FRT_min'].mean(), orientation='v')
+        fig_comp_t = apply_bdi_theme(fig_comp_t)
+        fig_comp_t.update_layout(xaxis_title="Minutos (Mediana)", yaxis_title="Segmento Patrimonial", showlegend=False)
+        st.plotly_chart(fig_comp_t, use_container_width=True)
+
+    st.caption("🟡 La línea punteada dorada marca el promedio del grupo.")
