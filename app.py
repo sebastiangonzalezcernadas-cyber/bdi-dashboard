@@ -6,7 +6,7 @@ import plotly.graph_objects as go
 import os
 import glob
 import shutil
-import gdown
+import requests
 import holidays
 from datetime import datetime
 
@@ -267,6 +267,7 @@ DAY_ORDER_LABORAL = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes']
 DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
 DRIVE_FOLDER_URL = "https://drive.google.com/drive/folders/1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2?usp=sharing"
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
+GOOGLE_DRIVE_API_URL = "https://www.googleapis.com/drive/v3/files"
 
 # -----------------------------------------------------------
 # TEMA APLICADO A TODOS LOS GRÁFICOS
@@ -376,40 +377,82 @@ def extract_tier(tag_str):
     return 'Sin Etiqueta Monto'
 
 
+def _listar_archivos_drive(folder_id, api_key):
+    """Lista los archivos actuales de la carpeta usando la API oficial de Drive."""
+    params = {
+        "q": f"'{folder_id}' in parents and trashed = false",
+        "key": api_key,
+        "fields": "files(id, name, mimeType)",
+        "pageSize": 1000,
+    }
+    resp = requests.get(GOOGLE_DRIVE_API_URL, params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json().get("files", [])
+
+
+def _descargar_archivo_drive(file_id, api_key, destino):
+    """Descarga el contenido binario de un archivo de Drive por su ID actual."""
+    url = f"{GOOGLE_DRIVE_API_URL}/{file_id}"
+    params = {"alt": "media", "key": api_key}
+    resp = requests.get(url, params=params, timeout=60)
+    resp.raise_for_status()
+    with open(destino, "wb") as f:
+        f.write(resp.content)
+
+
 @st.cache_data(ttl=1800)
 def cargar_datos_drive():
     """
-    Descarga siempre una copia fresca de todos los .xlsx de la carpeta de Drive.
-    Se borra el directorio local antes de descargar para evitar quedarse con
-    archivos viejos (por ejemplo, si se borró un Excel en Drive y se subió
-    uno nuevo con otro ID interno pero el mismo nombre).
+    Lista y descarga SIEMPRE el contenido actual de la carpeta de Drive usando
+    la API oficial (no gdown, que es poco confiable en hosting en la nube).
+    No depende de IDs guardados a mano: si agregás o borrás un Excel en Drive,
+    la próxima sincronización lo refleja automáticamente.
     """
     output_dir = "./data_drive"
 
-    # Limpieza total del directorio local antes de sincronizar
     if os.path.exists(output_dir):
         shutil.rmtree(output_dir, ignore_errors=True)
     os.makedirs(output_dir, exist_ok=True)
 
-    # Descarga de la carpeta completa de Drive (siempre trae el contenido actual)
-    try:
-        gdown.download_folder(id=DRIVE_FOLDER_ID, output=output_dir, quiet=True, remaining_ok=True)
-    except Exception:
-        pass
+    api_key = st.secrets.get("GDRIVE_API_KEY", "")
+    if not api_key:
+        st.session_state["_drive_error"] = (
+            "Falta configurar GDRIVE_API_KEY en los Secrets de Streamlit "
+            "(Settings → Secrets)."
+        )
+        return pd.DataFrame()
 
-    all_files = glob.glob(os.path.join(output_dir, "**", "*.xlsx"), recursive=True)
-    if not all_files:
+    try:
+        archivos = _listar_archivos_drive(DRIVE_FOLDER_ID, api_key)
+    except Exception as e:
+        st.session_state["_drive_error"] = f"No se pudo listar la carpeta de Drive: {e}"
+        return pd.DataFrame()
+
+    archivos_xlsx = [a for a in archivos if a["name"].lower().endswith(".xlsx")]
+    if not archivos_xlsx:
+        st.session_state["_drive_error"] = (
+            "La carpeta de Drive no tiene archivos .xlsx en este momento "
+            "(o la carpeta dejó de ser accesible)."
+        )
         return pd.DataFrame()
 
     dfs = []
-    for file in sorted(all_files):
+    errores_descarga = []
+    for archivo in archivos_xlsx:
+        destino = os.path.join(output_dir, archivo["name"])
         try:
-            df_temp = pd.read_excel(file)
-            dfs.append(df_temp)
-        except Exception:
-            continue
+            _descargar_archivo_drive(archivo["id"], api_key, destino)
+            dfs.append(pd.read_excel(destino))
+        except Exception as e:
+            errores_descarga.append(f"{archivo['name']}: {e}")
 
-    if not dfs: return pd.DataFrame()
+    if not dfs:
+        st.session_state["_drive_error"] = (
+            "No se pudo descargar ningún archivo. Detalle: " + "; ".join(errores_descarga)
+        )
+        return pd.DataFrame()
+
+    st.session_state.pop("_drive_error", None)
     df = pd.concat(dfs, ignore_index=True)
 
     df = df[~df['contactName'].isin(EXCLUIR_CONTACTOS)]
@@ -444,7 +487,7 @@ def sincronizar_datos():
 
 st.sidebar.markdown("### ⚙️ Panel de Control")
 st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=sincronizar_datos, use_container_width=True)
-st.sidebar.caption("Usá este botón cada vez que agregues, borres o reemplaces archivos en la carpeta de Drive. Recargar la página (F5) no alcanza para traer los datos nuevos.")
+st.sidebar.caption("Usá este botón cada vez que agregues, borres o reemplaces archivos en la carpeta de Drive: la app relee la carpeta entera en ese momento. Recargar la página (F5) no alcanza para traer los datos nuevos.")
 
 # Opción extra: Cargar archivo manualmente directamente en el navegador
 uploaded_files = st.sidebar.file_uploader("📂 O subir planilla .xlsx manualmente:", type=["xlsx"], accept_multiple_files=True)
@@ -467,6 +510,9 @@ if uploaded_files:
 
 if df_raw.empty:
     st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive o suba los archivos .xlsx mediante la opción del panel lateral.")
+    if "_drive_error" in st.session_state:
+        with st.expander("Detalle técnico (para diagnóstico)"):
+            st.code(st.session_state["_drive_error"])
     st.stop()
 
 # ---------------------------------------------------------
