@@ -7,6 +7,7 @@ import os
 import glob
 import shutil
 import re
+import json
 import gdown
 import holidays
 from datetime import datetime
@@ -62,6 +63,7 @@ st.markdown("""
         font-size: 0.78rem !important;
         font-weight: 600 !important;
         margin-top: 10px;
+        margin-right: 6px;
         border: 1px solid rgba(255,255,255,0.25);
     }
 
@@ -160,6 +162,7 @@ MESES_ES_MAP = {
     5: '05 - Mayo', 6: '06 - Junio', 7: '07 - Julio', 8: '08 - Agosto',
     9: '09 - Septiembre', 10: '10 - Octubre', 11: '11 - Noviembre', 12: '12 - Diciembre'
 }
+MESES_ORDEN = [MESES_ES_MAP[m] for m in range(1, 13)]
 
 NOMBRE_A_NUM = {
     'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
@@ -169,6 +172,7 @@ NOMBRE_A_NUM = {
 
 DRIVE_FOLDER_ID = "1CYKA6e2R_enmSVHpTrUdCFyGiZ_pKZH2"
 
+# Lista de respaldo. Solo se usa si NO hay credenciales de Service Account.
 ARCHIVOS_DRIVE_DIRECTOS = {
     '1 Enero.xlsx': '1zFNQvWpxMwlU_E-18WsTjsVa-E-14MkH',
     '2 Febrero.xlsx': '1unvZXggYzOB-xe-N1CeoYHTMz0QssfSj',
@@ -182,8 +186,12 @@ ARCHIVOS_DRIVE_DIRECTOS = {
 
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
 
+DATA_DIR = "./data_drive"
+MANIFEST_PATH = os.path.join(DATA_DIR, "_manifest.json")
+COLS_MINIMAS = ['createdAt', 'contactNumber']
+
 # -----------------------------------------------------------
-# FUNCIONES AUXILIARES
+# FUNCIONES AUXILIARES DE PRESENTACIÓN
 # -----------------------------------------------------------
 def apply_bdi_theme(fig, legend_below=False):
     fig.update_layout(
@@ -224,14 +232,21 @@ def add_reference_line(fig, value, orientation='v', label='Promedio'):
 def divider():
     st.markdown('<hr class="section-divider">', unsafe_allow_html=True)
 
+# -----------------------------------------------------------
+# FUNCIONES AUXILIARES DE DATOS
+# -----------------------------------------------------------
 def time_str_to_minutes(val):
-    if pd.isna(val) or not isinstance(val, str): return np.nan
+    if pd.isna(val): return np.nan
+    if isinstance(val, (int, float)): return float(val)
     try:
-        parts = val.split(':')
+        parts = str(val).split(':')
         if len(parts) == 3:
             h, m, s = map(int, parts)
             return h * 60 + m + (s / 60.0)
-    except:
+        if len(parts) == 2:
+            m, s = map(int, parts)
+            return m + (s / 60.0)
+    except Exception:
         return np.nan
     return np.nan
 
@@ -259,73 +274,208 @@ def extract_month_from_filename(filename):
             return MESES_ES_MAP[num]
     return 'Mes No Especificado'
 
-# -----------------------------------------------------------
-# CARGA Y DESCARGA DINÁMICA DE DATOS
-# -----------------------------------------------------------
-@st.cache_data
-def cargar_datos_drive():
-    output_dir = "./data_drive"
-    os.makedirs(output_dir, exist_ok=True)
+def col_segura(df, nombre):
+    """Devuelve la columna si existe; si no, una serie de NaN del mismo largo."""
+    if nombre in df.columns:
+        return df[nombre]
+    return pd.Series(np.nan, index=df.index)
 
-    archivos_a_descargar = dict(ARCHIVOS_DRIVE_DIRECTOS)
+def nombre_seguro(nombre):
+    return re.sub(r'[\\/:*?"<>|]', '_', str(nombre))
 
-    # Si se configuró Service Account en st.secrets, consulta la carpeta en vivo
-    if "gcp_service_account" in st.secrets:
+def es_xlsx_valido(path):
+    """Un .xlsx real es un ZIP: empieza con 'PK'. Descarta HTML de error de Drive."""
+    try:
+        if os.path.getsize(path) < 5000:
+            return False
+        with open(path, 'rb') as f:
+            return f.read(2) == b'PK'
+    except OSError:
+        return False
+
+# -----------------------------------------------------------
+# CAPA 1 · LISTADO DE ARCHIVOS EN DRIVE
+# -----------------------------------------------------------
+@st.cache_data(ttl=120, show_spinner=False)
+def listar_archivos_drive():
+    """Devuelve {nombre: {'id':..., 'modified':...}} y un log de diagnóstico."""
+    log, archivos = [], {}
+
+    try:
+        tiene_sa = "gcp_service_account" in st.secrets
+    except Exception:
+        tiene_sa = False  # No hay secrets.toml configurado
+
+    if tiene_sa:
         try:
             from google.oauth2 import service_account
             from googleapiclient.discovery import build
+
             creds = service_account.Credentials.from_service_account_info(
                 st.secrets["gcp_service_account"],
                 scopes=['https://www.googleapis.com/auth/drive.readonly']
             )
             service = build('drive', 'v3', credentials=creds)
-            results = service.files().list(
-                q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
-                fields="files(id, name)"
-            ).execute()
-            items = results.get('files', [])
-            for item in items:
-                if item['name'].endswith('.xlsx'):
-                    archivos_a_descargar[item['name']] = item['id']
-        except Exception:
-            pass
 
-    for fname, fid in archivos_a_descargar.items():
-        safe_name = fname.replace('/', '_')
-        filepath = os.path.join(output_dir, safe_name)
-        # Solo descarga si el archivo no existe localmente o pesa menos de 10KB (evita saturar Google Drive)
-        if not os.path.exists(filepath) or os.path.getsize(filepath) < 10000:
-            try:
-                gdown.download(id=fid, output=filepath, quiet=True)
-            except Exception:
-                pass
+            page_token = None
+            while True:
+                res = service.files().list(
+                    q=f"'{DRIVE_FOLDER_ID}' in parents and trashed=false",
+                    fields="nextPageToken, files(id, name, modifiedTime)",
+                    pageSize=200,
+                    pageToken=page_token,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                ).execute()
+                for item in res.get('files', []):
+                    if item['name'].lower().endswith('.xlsx'):
+                        archivos[item['name']] = {'id': item['id'], 'modified': item.get('modifiedTime')}
+                page_token = res.get('nextPageToken')
+                if not page_token:
+                    break
 
-    all_files = glob.glob(os.path.join(output_dir, "**", "*.xlsx"), recursive=True)
-    if not all_files:
-        return pd.DataFrame()
+            log.append(("ok", f"Drive API conectada · {len(archivos)} planillas .xlsx en la carpeta."))
+            if not archivos:
+                log.append(("error", "La carpeta respondió vacía. Verificá que la carpeta esté compartida con el mail de la Service Account."))
+        except Exception as e:
+            log.append(("error", f"Falló el listado de Drive → {type(e).__name__}: {e}"))
+    else:
+        log.append(("warn", "No hay credenciales `gcp_service_account` cargadas: no se detectan archivos nuevos de forma automática."))
 
-    dfs = []
-    for file in sorted(all_files):
+    if not archivos:
+        archivos = {n: {'id': i, 'modified': None} for n, i in ARCHIVOS_DRIVE_DIRECTOS.items()}
+        log.append(("warn",
+                    f"Usando la lista fija de {len(archivos)} IDs. Cualquier planilla nueva que subas a Drive "
+                    "NO va a aparecer hasta agregarla a ARCHIVOS_DRIVE_DIRECTOS o configurar la Service Account."))
+    return archivos, log
+
+# -----------------------------------------------------------
+# CAPA 2 · DESCARGA Y SINCRONIZACIÓN LOCAL
+# -----------------------------------------------------------
+def sincronizar_archivos(archivos, forzar=False):
+    os.makedirs(DATA_DIR, exist_ok=True)
+    log = []
+
+    manifest = {}
+    if os.path.exists(MANIFEST_PATH) and not forzar:
         try:
-            if os.path.getsize(file) > 10000:
-                df_temp = pd.read_excel(file)
-                df_temp['archivo_origen'] = os.path.basename(file)
-                df_temp['mes_archivo'] = extract_month_from_filename(file)
-                dfs.append(df_temp)
+            with open(MANIFEST_PATH, 'r', encoding='utf-8') as f:
+                manifest = json.load(f)
         except Exception:
+            manifest = {}
+
+    esperados = set()
+
+    for nombre, meta in archivos.items():
+        safe = nombre_seguro(nombre)
+        esperados.add(safe)
+        path = os.path.join(DATA_DIR, safe)
+        remoto = meta.get('modified')
+        local = manifest.get(safe, {})
+
+        al_dia = (
+            es_xlsx_valido(path)
+            and local.get('id') == meta['id']
+            and (remoto is None or local.get('modified') == remoto)
+        )
+        if al_dia and not forzar:
             continue
 
-    if not dfs: return pd.DataFrame()
-    df = pd.concat(dfs, ignore_index=True)
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+            resultado = gdown.download(id=meta['id'], output=path, quiet=True)
+            if resultado is None or not es_xlsx_valido(path):
+                if os.path.exists(path):
+                    os.remove(path)
+                manifest.pop(safe, None)
+                log.append(("error",
+                            f"«{nombre}»: la descarga falló o no devolvió un .xlsx válido. "
+                            "Revisá que el archivo esté compartido como “Cualquier persona con el enlace”."))
+                continue
+            manifest[safe] = {
+                'id': meta['id'],
+                'modified': remoto,
+                'descargado': datetime.now().strftime('%d/%m/%Y %H:%M')
+            }
+            log.append(("ok", f"«{nombre}» descargado / actualizado."))
+        except Exception as e:
+            log.append(("error", f"«{nombre}» → {type(e).__name__}: {e}"))
 
-    df = df[~df['contactName'].isin(EXCLUIR_CONTACTOS)]
+    # Limpieza: borra planillas locales que ya no están en Drive (evita meses duplicados)
+    for f in glob.glob(os.path.join(DATA_DIR, "*.xlsx")):
+        base = os.path.basename(f)
+        if base not in esperados:
+            try:
+                os.remove(f)
+                manifest.pop(base, None)
+                log.append(("warn", f"«{base}» ya no está en la carpeta de Drive: se eliminó la copia local."))
+            except OSError:
+                pass
 
-    df['createdAt_dt'] = pd.to_datetime(df['createdAt'], errors='coerce')
-    df['firstSentMessageAt_dt'] = pd.to_datetime(df['firstSentMessageAt'], errors='coerce')
+    try:
+        with open(MANIFEST_PATH, 'w', encoding='utf-8') as f:
+            json.dump(manifest, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+    return log, manifest
+
+def firma_local():
+    """Huella de los archivos locales. Cambia cuando cambia cualquier planilla → invalida el caché."""
+    out = []
+    for f in sorted(glob.glob(os.path.join(DATA_DIR, "*.xlsx"))):
+        out.append((os.path.basename(f), os.path.getsize(f), int(os.path.getmtime(f))))
+    return tuple(out)
+
+# -----------------------------------------------------------
+# CAPA 3 · LECTURA Y PROCESAMIENTO
+# -----------------------------------------------------------
+@st.cache_data(show_spinner="Leyendo planillas…")
+def leer_planillas(firma):
+    dfs, log = [], []
+    for nombre, _, _ in firma:
+        path = os.path.join(DATA_DIR, nombre)
+        try:
+            d = pd.read_excel(path)
+        except Exception as e:
+            log.append(("error", f"«{nombre}» no se pudo abrir → {type(e).__name__}: {e}"))
+            continue
+        if d.empty:
+            log.append(("warn", f"«{nombre}» está vacío."))
+            continue
+        faltantes = [c for c in COLS_MINIMAS if c not in d.columns]
+        if faltantes:
+            log.append(("error", f"«{nombre}» no tiene las columnas {faltantes}. Se omite (¿cambió el export del CRM?)."))
+            continue
+        d['archivo_origen'] = nombre
+        d['mes_archivo'] = extract_month_from_filename(nombre)
+        dfs.append(d)
+        log.append(("ok", f"«{nombre}»: {len(d):,} filas leídas."))
+    if not dfs:
+        return pd.DataFrame(), log
+    return pd.concat(dfs, ignore_index=True), log
+
+def procesar(df):
+    """Normaliza y deriva columnas. Se aplica UNA sola vez sobre Drive + subidas manuales."""
+    if df.empty:
+        return df
+
+    if 'contactName' in df.columns:
+        df = df[~df['contactName'].isin(EXCLUIR_CONTACTOS)]
+
+    # Deduplicación por chat: si un mes se solapa con otro archivo, no se cuenta dos veces.
+    if 'chatId' in df.columns:
+        df = df.drop_duplicates(subset=['chatId'], keep='last')
+    else:
+        df = df.drop_duplicates(subset=[c for c in ['contactNumber', 'createdAt'] if c in df.columns])
+
+    df = df.reset_index(drop=True)
+
+    df['createdAt_dt'] = pd.to_datetime(col_segura(df, 'createdAt'), errors='coerce')
+    df['firstSentMessageAt_dt'] = pd.to_datetime(col_segura(df, 'firstSentMessageAt'), errors='coerce')
 
     df['fecha_corta'] = df['createdAt_dt'].dt.date
-    
-    # Asignación de mes cronológico
     df['mes_nombre'] = df['createdAt_dt'].dt.month.map(MESES_ES_MAP)
     df['mes_nombre'] = df['mes_nombre'].fillna(df['mes_archivo'])
 
@@ -334,14 +484,20 @@ def cargar_datos_drive():
     df['hora_30m'] = df['createdAt_dt'].dt.floor('30min').dt.strftime('%H:%M')
 
     df['FRT_min'] = (df['firstSentMessageAt_dt'] - df['createdAt_dt']).dt.total_seconds() / 60.0
-    df['resp_time_wh_min'] = df['workingHoursResponseTime'].apply(time_str_to_minutes)
-    df['res_time_wh_min'] = df['workingHoursResolutionTime'].apply(time_str_to_minutes)
+    df['resp_time_wh_min'] = col_segura(df, 'workingHoursResponseTime').apply(time_str_to_minutes)
+    df['res_time_wh_min'] = col_segura(df, 'workingHoursResolutionTime').apply(time_str_to_minutes)
 
-    df['brokers'] = df['tags'].apply(extract_brokers)
-    df['tier'] = df['tags'].apply(extract_tier)
+    df['brokers'] = col_segura(df, 'tags').apply(extract_brokers)
+    df['tier'] = col_segura(df, 'tags').apply(extract_tier)
 
-    df['isNewContact'] = df['isNewContact'].fillna(False).astype(bool)
-    df['resolvedByInactivity'] = df['resolvedByInactivity'].fillna(False).astype(bool)
+    if 'chatId' not in df.columns:
+        df['chatId'] = np.arange(len(df))
+    if 'user' not in df.columns:
+        df['user'] = 'Sin Asignar'
+    df['user'] = df['user'].fillna('Sin Asignar')
+
+    df['isNewContact'] = col_segura(df, 'isNewContact').fillna(False).astype(bool)
+    df['resolvedByInactivity'] = col_segura(df, 'resolvedByInactivity').fillna(False).astype(bool)
 
     return df
 
@@ -350,65 +506,78 @@ def cargar_datos_drive():
 # ---------------------------------------------------------
 st.sidebar.markdown("### ⚙️ Panel de Control")
 
-def forzar_sincronizacion():
-    output_dir = "./data_drive"
-    if os.path.exists(output_dir):
-        shutil.rmtree(output_dir, ignore_errors=True)
+def marcar_sincronizacion():
+    st.session_state["_forzar_sync"] = True
     st.cache_data.clear()
 
-if st.sidebar.button("🔄 Sincronizar datos de Google Drive", on_click=forzar_sincronizacion, use_container_width=True):
-    st.rerun()
+st.sidebar.button("🔄 Sincronizar datos de Google Drive",
+                  on_click=marcar_sincronizacion, use_container_width=True)
 
-uploaded_files = st.sidebar.file_uploader("📂 O cargar planilla .xlsx manualmente:", type=["xlsx"], accept_multiple_files=True)
+forzar = st.session_state.pop("_forzar_sync", False)
+if forzar and os.path.exists(DATA_DIR):
+    shutil.rmtree(DATA_DIR, ignore_errors=True)
 
-df_raw = cargar_datos_drive()
+archivos_drive, log_listado = listar_archivos_drive()
+log_descarga, manifest = sincronizar_archivos(archivos_drive, forzar=forzar)
+df_drive_raw, log_lectura = leer_planillas(firma_local())
 
+uploaded_files = st.sidebar.file_uploader("📂 O cargar planilla .xlsx manualmente:",
+                                          type=["xlsx"], accept_multiple_files=True)
+
+frames = [df_drive_raw] if not df_drive_raw.empty else []
+log_upload = []
 if uploaded_files:
-    dfs_up = []
-    for up_file in uploaded_files:
+    for up in uploaded_files:
         try:
-            df_temp = pd.read_excel(up_file)
-            df_temp['archivo_origen'] = up_file.name
-            df_temp['mes_archivo'] = extract_month_from_filename(up_file.name)
-            dfs_up.append(df_temp)
-        except Exception:
-            pass
-    if dfs_up:
-        df_uploaded = pd.concat(dfs_up, ignore_index=True)
-        df_uploaded['createdAt_dt'] = pd.to_datetime(df_uploaded['createdAt'], errors='coerce')
-        df_uploaded['firstSentMessageAt_dt'] = pd.to_datetime(df_uploaded['firstSentMessageAt'], errors='coerce')
-        df_uploaded['mes_nombre'] = df_uploaded['createdAt_dt'].dt.month.map(MESES_ES_MAP).fillna(df_uploaded['mes_archivo'])
-        df_uploaded['dia_semana'] = df_uploaded['createdAt_dt'].dt.day_name().map(DAY_MAP)
-        df_uploaded['hora'] = df_uploaded['createdAt_dt'].dt.hour
-        df_uploaded['hora_30m'] = df_uploaded['createdAt_dt'].dt.floor('30min').dt.strftime('%H:%M')
-        df_uploaded['FRT_min'] = (df_uploaded['firstSentMessageAt_dt'] - df_uploaded['createdAt_dt']).dt.total_seconds() / 60.0
-        df_uploaded['resp_time_wh_min'] = df_uploaded['workingHoursResponseTime'].apply(time_str_to_minutes)
-        df_uploaded['res_time_wh_min'] = df_uploaded['workingHoursResolutionTime'].apply(time_str_to_minutes)
-        df_uploaded['brokers'] = df_uploaded['tags'].apply(extract_brokers)
-        df_uploaded['tier'] = df_uploaded['tags'].apply(extract_tier)
-        df_uploaded['isNewContact'] = df_uploaded['isNewContact'].fillna(False).astype(bool)
-        df_uploaded['resolvedByInactivity'] = df_uploaded['resolvedByInactivity'].fillna(False).astype(bool)
+            d = pd.read_excel(up)
+            d['archivo_origen'] = f"[manual] {up.name}"
+            d['mes_archivo'] = extract_month_from_filename(up.name)
+            frames.append(d)
+            log_upload.append(("ok", f"«{up.name}» (manual): {len(d):,} filas."))
+        except Exception as e:
+            log_upload.append(("error", f"«{up.name}» → {type(e).__name__}: {e}"))
 
-        if not df_raw.empty:
-            df_raw = pd.concat([df_raw, df_uploaded], ignore_index=True).drop_duplicates()
+df_raw = procesar(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame()
+
+# ---------------------------------------------------------
+# DIAGNÓSTICO (clave para saber si el mes nuevo entró o no)
+# ---------------------------------------------------------
+todos_los_logs = log_listado + log_descarga + log_lectura + log_upload
+hay_errores = any(nivel == "error" for nivel, _ in todos_los_logs)
+
+with st.sidebar.expander("🩺 Diagnóstico de carga", expanded=hay_errores):
+    for nivel, msg in todos_los_logs:
+        if nivel == "ok":
+            st.success(msg, icon="✅")
+        elif nivel == "warn":
+            st.warning(msg, icon="⚠️")
         else:
-            df_raw = df_uploaded
+            st.error(msg, icon="🚫")
 
 if df_raw.empty:
-    st.error("No se encontraron datos para procesar. Verifique el acceso a Google Drive o cargue los archivos manualmente.")
+    st.error("No se encontraron datos para procesar. Abrí **🩺 Diagnóstico de carga** en la barra lateral "
+             "para ver exactamente qué archivo falló, o cargá las planillas manualmente.")
     st.stop()
 
-archivos_cargados = df_raw['archivo_origen'].dropna().unique()
-st.sidebar.success(f"📁 **{len(archivos_cargados)} planillas procesadas**")
-with st.sidebar.expander("📄 Ver archivos detectados"):
-    for a in sorted(archivos_cargados):
-        st.write(f"- {a}")
+resumen_archivos = df_raw.groupby('archivo_origen').agg(
+    Filas=('archivo_origen', 'size'),
+    Desde=('createdAt_dt', 'min'),
+    Hasta=('createdAt_dt', 'max')
+).reset_index()
+resumen_archivos['Desde'] = resumen_archivos['Desde'].dt.strftime('%d/%m/%Y')
+resumen_archivos['Hasta'] = resumen_archivos['Hasta'].dt.strftime('%d/%m/%Y')
+resumen_archivos.columns = ['Planilla', 'Filas', 'Desde', 'Hasta']
+
+st.sidebar.success(f"📁 **{len(resumen_archivos)} planillas activas**")
+with st.sidebar.expander("📄 Cobertura por planilla"):
+    st.dataframe(resumen_archivos, use_container_width=True, hide_index=True)
 
 # ---------------------------------------------------------
 # FILTROS DINÁMICOS
 # ---------------------------------------------------------
 st.sidebar.markdown("### 🔎 Filtros de Búsqueda")
-meses_disponibles = sorted(df_raw['mes_nombre'].dropna().unique())
+meses_disponibles = [m for m in MESES_ORDEN if m in set(df_raw['mes_nombre'].dropna())]
+meses_disponibles += sorted(set(df_raw['mes_nombre'].dropna()) - set(MESES_ORDEN))
 meses_sel = st.sidebar.multiselect("Mes:", meses_disponibles, default=meses_disponibles)
 
 asesores_disponibles = sorted(df_raw['user'].dropna().unique())
@@ -418,14 +587,22 @@ df = df_raw.copy()
 if meses_sel: df = df[df['mes_nombre'].isin(meses_sel)]
 if asesores_sel: df = df[df['user'].isin(asesores_sel)]
 
+if df.empty:
+    st.warning("Los filtros actuales no devuelven ningún chat. Ampliá la selección de meses o asesores.")
+    st.stop()
+
 # ---------------------------------------------------------
 # HEADER PRINCIPAL Y KPIs
 # ---------------------------------------------------------
+ultimo_dato = df_raw['createdAt_dt'].max()
+ultimo_dato_txt = ultimo_dato.strftime('%d/%m/%Y %H:%M') if pd.notna(ultimo_dato) else "s/d"
+
 st.markdown(f"""
 <div class="bdi-header">
     <h1>📈 Dashboard de Gestión de Mensajería</h1>
     <p>BDI Consultora — Consolidado analítico de conversaciones, rendimiento operativo por asesor y distribución patrimonial.</p>
-    <span class="bdi-badge">Actualizado: {datetime.now().strftime('%d/%m/%Y %H:%M')}</span>
+    <span class="bdi-badge">Último chat en la base: {ultimo_dato_txt}</span>
+    <span class="bdi-badge">Tablero generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -454,7 +631,9 @@ with tab1:
     col_t1, col_t2 = st.columns(2)
     with col_t1:
         df_mes = df.groupby('mes_nombre').size().reset_index(name='Chats')
-        df_mes = df_mes.sort_values('mes_nombre')
+        df_mes['orden'] = df_mes['mes_nombre'].apply(
+            lambda m: meses_disponibles.index(m) if m in meses_disponibles else 99)
+        df_mes = df_mes.sort_values('orden')
         fig_mes = px.bar(
             df_mes, x='mes_nombre', y='Chats', text='Chats',
             color_discrete_sequence=['#157347'], title="Evolución Mensual de Chats",
@@ -627,8 +806,8 @@ with tab3:
     section_header("RANKING", "Top 10 Clientes con Mayor Interacción")
     df_clients_all = df.groupby(['contactName', 'contactNumber']).agg(
         Total_Chats=('chatId', 'count'),
-        Asesor_Habitual=('user', lambda x: x.mode()[0] if not x.empty else ''),
-        Segmento_Monto=('tier', lambda x: x.mode()[0] if not x.empty else '')
+        Asesor_Habitual=('user', lambda x: x.mode()[0] if not x.mode().empty else ''),
+        Segmento_Monto=('tier', lambda x: x.mode()[0] if not x.mode().empty else '')
     ).reset_index()
 
     df_top10 = df_clients_all.sort_values('Total_Chats', ascending=False).head(10).sort_values('Total_Chats', ascending=True)
@@ -647,7 +826,6 @@ with tab3:
 
     section_header("BASE DE CLIENTES", "Listado Completo e Interactivo")
 
-    # Pareto 80/20
     df_pareto = df_clients_all.sort_values('Total_Chats', ascending=False)
     total_chats_pareto = df_pareto['Total_Chats'].sum()
     if total_chats_pareto > 0:
@@ -663,8 +841,8 @@ with tab3:
 
     if search_query:
         mask = (
-            df_filtered_clients['contactName'].astype(str).str.contains(search_query, case=False, na=False) |
-            df_filtered_clients['contactNumber'].astype(str).str.contains(search_query, case=False, na=False)
+            df_filtered_clients['contactName'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+            df_filtered_clients['contactNumber'].astype(str).str.contains(search_query, case=False, na=False, regex=False)
         )
         df_filtered_clients = df_filtered_clients[mask]
 
@@ -685,7 +863,7 @@ with tab4:
 
     total_general_chats = len(df)
 
-    if not df.empty and not df['createdAt_dt'].dropna().empty:
+    if not df['createdAt_dt'].dropna().empty:
         min_date = df['createdAt_dt'].min().date()
         max_date = df['createdAt_dt'].max().date()
         years = df['createdAt_dt'].dt.year.dropna().unique().tolist()
@@ -813,7 +991,7 @@ with tab4:
             z=z,
             x=[f"{h:02d}:00" for h in heatmap_data.columns],
             y=heatmap_data.index,
-            colorscale=[[0, '#F4F9F6'], [0.5, '#8FBF74'],],
+            colorscale=[[0.0, '#F4F9F6'], [0.5, '#8FBF74'], [1.0, '#0F5132']],
             colorbar=dict(title="Chats", thickness=14, len=0.8),
             hovertemplate="<b>%{y}, %{x}</b><br>Chats: %{z}<extra></extra>",
             zmin=0, zmax=zmax
@@ -864,7 +1042,7 @@ with tab5:
     df_brk_ratio_kpi['Ratio'] = df_brk_ratio_kpi['Chats'] / df_brk_ratio_kpi['Usuarios']
     broker_mas_dependiente = df_brk_ratio_kpi['Ratio'].idxmax() if not df_brk_ratio_kpi.empty else "—"
 
-    df_tier_frt_kpi = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median()
+    df_tier_frt_kpi = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median().dropna()
     segmento_mas_lento = df_tier_frt_kpi.idxmax() if not df_tier_frt_kpi.empty else "—"
 
     kf1, kf2, kf3, kf4 = st.columns(4)
