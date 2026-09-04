@@ -8,6 +8,7 @@ import glob
 import shutil
 import re
 import json
+import inspect
 import gdown
 import holidays
 from datetime import datetime
@@ -21,6 +22,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+# Compatibilidad de versiones: Streamlit reemplazó `use_container_width` por `width`.
+# Se detecta en runtime para que la app no se rompa cuando el Cloud actualice la librería.
+try:
+    _SOPORTA_WIDTH = 'width' in inspect.signature(st.dataframe).parameters
+except (ValueError, TypeError):
+    _SOPORTA_WIDTH = False
+ANCHO = {'width': 'stretch'} if _SOPORTA_WIDTH else {'use_container_width': True}
 
 # -----------------------------------------------------------
 # ESTILOS GLOBALES
@@ -163,6 +172,19 @@ MESES_ES_MAP = {
     9: '09 - Septiembre', 10: '10 - Octubre', 11: '11 - Noviembre', 12: '12 - Diciembre'
 }
 MESES_ORDEN = [MESES_ES_MAP[m] for m in range(1, 13)]
+NOMBRE_MES = {1: 'Enero', 2: 'Febrero', 3: 'Marzo', 4: 'Abril', 5: 'Mayo', 6: 'Junio',
+              7: 'Julio', 8: 'Agosto', 9: 'Septiembre', 10: 'Octubre', 11: 'Noviembre', 12: 'Diciembre'}
+
+# Escala del mapa de calor en verdes BDI (de papel a verde institucional).
+BDI_HEATSCALE = [
+    [0.00, '#FFFFFF'], [0.12, '#EDF7F1'], [0.28, '#CFE9DA'], [0.45, '#9FD3B6'],
+    [0.62, '#5FBB8C'], [0.78, '#2FA66B'], [0.90, '#157347'], [1.00, '#0B3D27']
+]
+
+# Etiquetas comerciales que no son broker ni segmento patrimonial.
+SERVICIOS = ['Membresia', 'Agro', 'Consultoria', 'Potencial Cliente', '+1 Cuenta']
+SERVICIO_COLORS = {'Membresia': '#0F5132', 'Agro': '#8FBF74', 'Consultoria': '#3AAFB9',
+                   'Potencial Cliente': '#C9A227', '+1 Cuenta': '#2FA66B'}
 
 NOMBRE_A_NUM = {
     'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
@@ -189,6 +211,12 @@ EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline
 DATA_DIR = "./data_drive"
 MANIFEST_PATH = os.path.join(DATA_DIR, "_manifest.json")
 COLS_MINIMAS = ['createdAt', 'contactNumber']
+
+# ID real de cada conversación en el export de Whaticket.
+# OJO: 'chatId' NO sirve — es el hilo del contacto y se repite en todas sus conversaciones
+# (en el export de enero: 1.934 conversationId únicos contra apenas 722 chatId).
+COL_ID = 'conversationId'
+COLS_DEDUP_FALLBACK = ['chatId', 'contactNumber', 'createdAt', 'firstSentMessageAt', 'user']
 
 # -----------------------------------------------------------
 # FUNCIONES AUXILIARES DE PRESENTACIÓN
@@ -236,19 +264,34 @@ def divider():
 # FUNCIONES AUXILIARES DE DATOS
 # -----------------------------------------------------------
 def time_str_to_minutes(val):
-    if pd.isna(val): return np.nan
-    if isinstance(val, (int, float)): return float(val)
+    """'27:35:52' -> 1655.87 minutos. El CRM no rellena con ceros y las horas pueden pasar de 24."""
+    if pd.isna(val):
+        return np.nan
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return float(val)
+    partes = str(val).strip().split(':')
     try:
-        parts = str(val).split(':')
-        if len(parts) == 3:
-            h, m, s = map(int, parts)
-            return h * 60 + m + (s / 60.0)
-        if len(parts) == 2:
-            m, s = map(int, parts)
-            return m + (s / 60.0)
-    except Exception:
+        if len(partes) == 3:
+            h, m, s = (int(p) for p in partes)
+            return h * 60 + m + s / 60.0
+        if len(partes) == 2:
+            m, s = (int(p) for p in partes)
+            return m + s / 60.0
+    except (ValueError, TypeError):
         return np.nan
     return np.nan
+
+def etiqueta_periodo(ts):
+    """'2026-01 · Enero'. Incluye el año para que enero 2027 no se mezcle con enero 2026."""
+    if pd.isna(ts):
+        return 'Sin Período'
+    return f"{ts.year}-{ts.month:02d} · {NOMBRE_MES[ts.month]}"
+
+def extract_servicios(tag_str):
+    if pd.isna(tag_str):
+        return []
+    tags = [t.strip().lower() for t in str(tag_str).split(',')]
+    return [s for s in SERVICIOS if any(s.lower() == t or s.lower() in t for t in tags)]
 
 def extract_brokers(tag_str):
     if pd.isna(tag_str): return []
@@ -456,50 +499,105 @@ def leer_planillas(firma):
         return pd.DataFrame(), log
     return pd.concat(dfs, ignore_index=True), log
 
-def procesar(df):
+def dias_habiles_efectivos(serie_fechas):
+    """Días hábiles reales de los meses presentes, respetando meses parciales.
+
+    Evita el error de tomar min→max cuando se filtran meses no contiguos
+    (ej. enero + agosto no son 8 meses de días hábiles).
+    """
+    fechas = serie_fechas.dropna()
+    if fechas.empty:
+        return 1
+    anios = sorted({int(a) for a in fechas.dt.year.unique() if a > 2000})
+    feriados = holidays.AR(years=anios) if anios else holidays.AR()
+    dias = set()
+    for _, grupo in fechas.groupby(fechas.dt.to_period('M')):
+        for d in pd.date_range(grupo.min().date(), grupo.max().date()):
+            if d.weekday() < 5 and d.date() not in feriados:
+                dias.add(d.date())
+    return max(len(dias), 1)
+
+def procesar(df, dedup=True):
     """Normaliza y deriva columnas. Se aplica UNA sola vez sobre Drive + subidas manuales."""
+    log = []
     if df.empty:
-        return df
+        return df, log
+
+    filas_iniciales = len(df)
 
     if 'contactName' in df.columns:
         df = df[~df['contactName'].isin(EXCLUIR_CONTACTOS)]
+    excluidos = filas_iniciales - len(df)
+    if excluidos:
+        log.append(("ok", f"{excluidos:,} filas excluidas por contactos de soporte."))
 
-    # Deduplicación por chat: si un mes se solapa con otro archivo, no se cuenta dos veces.
-    if 'chatId' in df.columns:
-        df = df.drop_duplicates(subset=['chatId'], keep='last')
+    # Deduplicación por el ID real de la conversación.
+    if dedup:
+        antes = len(df)
+        if COL_ID in df.columns:
+            df = df.drop_duplicates(subset=[COL_ID], keep='last')
+            criterio = f"`{COL_ID}`"
+        else:
+            claves = [c for c in COLS_DEDUP_FALLBACK if c in df.columns]
+            df = df.drop_duplicates(subset=claves, keep='last') if claves else df
+            criterio = f"huella compuesta {claves}"
+            log.append(("warn", f"El export no trae `{COL_ID}`: se deduplica con {criterio}."))
+        removidas = antes - len(df)
+        if removidas:
+            pct = removidas / antes * 100
+            log.append(("warn" if pct > 5 else "ok",
+                        f"{removidas:,} conversaciones repetidas eliminadas ({pct:.1f}%) por {criterio}."))
     else:
-        df = df.drop_duplicates(subset=[c for c in ['contactNumber', 'createdAt'] if c in df.columns])
+        log.append(("warn", "Deduplicación desactivada: los días solapados entre planillas se cuentan dos veces."))
 
     df = df.reset_index(drop=True)
 
+    # --- Fechas
     df['createdAt_dt'] = pd.to_datetime(col_segura(df, 'createdAt'), errors='coerce')
     df['firstSentMessageAt_dt'] = pd.to_datetime(col_segura(df, 'firstSentMessageAt'), errors='coerce')
+    df['resolvedAt_dt'] = pd.to_datetime(col_segura(df, 'resolvedAt'), errors='coerce')
+
+    sin_fecha = df['createdAt_dt'].isna().sum()
+    if sin_fecha:
+        log.append(("warn", f"{sin_fecha:,} filas sin `createdAt` válido: quedan fuera del análisis temporal."))
 
     df['fecha_corta'] = df['createdAt_dt'].dt.date
+    df['periodo'] = df['createdAt_dt'].apply(etiqueta_periodo)
     df['mes_nombre'] = df['createdAt_dt'].dt.month.map(MESES_ES_MAP)
-    df['mes_nombre'] = df['mes_nombre'].fillna(df['mes_archivo'])
 
     df['dia_semana'] = df['createdAt_dt'].dt.day_name().map(DAY_MAP)
     df['hora'] = df['createdAt_dt'].dt.hour
     df['hora_30m'] = df['createdAt_dt'].dt.floor('30min').dt.strftime('%H:%M')
 
+    # --- Tiempos
     df['FRT_min'] = (df['firstSentMessageAt_dt'] - df['createdAt_dt']).dt.total_seconds() / 60.0
+    df.loc[df['FRT_min'] < 0, 'FRT_min'] = np.nan
+    df['resp_time_min'] = col_segura(df, 'responseTime').apply(time_str_to_minutes)
     df['resp_time_wh_min'] = col_segura(df, 'workingHoursResponseTime').apply(time_str_to_minutes)
+    df['res_time_min'] = col_segura(df, 'resolutionTime').apply(time_str_to_minutes)
     df['res_time_wh_min'] = col_segura(df, 'workingHoursResolutionTime').apply(time_str_to_minutes)
 
+    # --- Etiquetas
     df['brokers'] = col_segura(df, 'tags').apply(extract_brokers)
     df['tier'] = col_segura(df, 'tags').apply(extract_tier)
+    df['servicios'] = col_segura(df, 'tags').apply(extract_servicios)
 
-    if 'chatId' not in df.columns:
-        df['chatId'] = np.arange(len(df))
+    # --- Identificadores y flags
+    if COL_ID not in df.columns:
+        df[COL_ID] = np.arange(len(df)).astype(str)
     if 'user' not in df.columns:
         df['user'] = 'Sin Asignar'
     df['user'] = df['user'].fillna('Sin Asignar')
+    if 'contactName' not in df.columns:
+        df['contactName'] = 'Sin Nombre'
+    df['contactName'] = df['contactName'].fillna('Sin Nombre')
 
     df['isNewContact'] = col_segura(df, 'isNewContact').fillna(False).astype(bool)
     df['resolvedByInactivity'] = col_segura(df, 'resolvedByInactivity').fillna(False).astype(bool)
+    df['startedByContact'] = col_segura(df, 'startedByContact').fillna(False).astype(bool)
 
-    return df
+    log.append(("ok", f"Base final: {len(df):,} conversaciones de {filas_iniciales:,} filas leídas."))
+    return df, log
 
 # ---------------------------------------------------------
 # PANEL DE CONTROL LATERAL
@@ -511,7 +609,7 @@ def marcar_sincronizacion():
     st.cache_data.clear()
 
 st.sidebar.button("🔄 Sincronizar datos de Google Drive",
-                  on_click=marcar_sincronizacion, use_container_width=True)
+                  on_click=marcar_sincronizacion, **ANCHO)
 
 forzar = st.session_state.pop("_forzar_sync", False)
 if forzar and os.path.exists(DATA_DIR):
@@ -537,13 +635,49 @@ if uploaded_files:
         except Exception as e:
             log_upload.append(("error", f"«{up.name}» → {type(e).__name__}: {e}"))
 
-df_raw = procesar(pd.concat(frames, ignore_index=True)) if frames else pd.DataFrame()
+dedup_on = st.sidebar.checkbox(
+    "Eliminar filas duplicadas", value=True,
+    help="Descarta filas idénticas cuando dos planillas comparten días. Si sospechás que se están "
+         "borrando chats legítimos, destildalo y compará el Total Chats."
+)
+
+if frames:
+    df_raw, log_proceso = procesar(pd.concat(frames, ignore_index=True), dedup=dedup_on)
+else:
+    df_raw, log_proceso = pd.DataFrame(), []
 
 # ---------------------------------------------------------
 # DIAGNÓSTICO (clave para saber si el mes nuevo entró o no)
 # ---------------------------------------------------------
-todos_los_logs = log_listado + log_descarga + log_lectura + log_upload
+todos_los_logs = log_listado + log_descarga + log_lectura + log_upload + log_proceso
 hay_errores = any(nivel == "error" for nivel, _ in todos_los_logs)
+
+if df_raw.empty:
+    st.error("No se encontraron datos para procesar. Abrí **🩺 Diagnóstico de carga** en la barra lateral "
+             "para ver exactamente qué archivo falló, o cargá las planillas manualmente.")
+    st.stop()
+
+resumen_archivos = df_raw.groupby('archivo_origen').agg(
+    Conversaciones=(COL_ID, 'nunique'),
+    Contactos=('contactNumber', 'nunique'),
+    Desde=('createdAt_dt', 'min'),
+    Hasta=('createdAt_dt', 'max'),
+    Periodos=('periodo', lambda s: ', '.join(sorted(s.dropna().unique())))
+).reset_index()
+resumen_archivos['Desde'] = resumen_archivos['Desde'].dt.strftime('%d/%m/%Y')
+resumen_archivos['Hasta'] = resumen_archivos['Hasta'].dt.strftime('%d/%m/%Y')
+resumen_archivos.columns = ['Planilla', 'Conversaciones', 'Contactos', 'Desde', 'Hasta', 'Períodos']
+
+# Aviso si el nombre del archivo declara un mes distinto al de su contenido.
+for _, fila in resumen_archivos.iterrows():
+    mes_nombre_archivo = extract_month_from_filename(fila['Planilla'])
+    meses_reales = {p.split('· ')[-1] for p in fila['Períodos'].split(', ') if '· ' in p}
+    if mes_nombre_archivo != 'Mes No Especificado' and meses_reales:
+        declarado = mes_nombre_archivo.split(' - ')[-1]
+        if declarado not in meses_reales:
+            todos_los_logs.append(("warn",
+                f"«{fila['Planilla']}» sugiere {declarado} por su nombre pero contiene {', '.join(sorted(meses_reales))}. "
+                "Se usan siempre las fechas reales de `createdAt`, no el nombre del archivo."))
 
 with st.sidebar.expander("🩺 Diagnóstico de carga", expanded=hay_errores):
     for nivel, msg in todos_los_logs:
@@ -554,41 +688,36 @@ with st.sidebar.expander("🩺 Diagnóstico de carga", expanded=hay_errores):
         else:
             st.error(msg, icon="🚫")
 
-if df_raw.empty:
-    st.error("No se encontraron datos para procesar. Abrí **🩺 Diagnóstico de carga** en la barra lateral "
-             "para ver exactamente qué archivo falló, o cargá las planillas manualmente.")
-    st.stop()
-
-resumen_archivos = df_raw.groupby('archivo_origen').agg(
-    Filas=('archivo_origen', 'size'),
-    Desde=('createdAt_dt', 'min'),
-    Hasta=('createdAt_dt', 'max')
-).reset_index()
-resumen_archivos['Desde'] = resumen_archivos['Desde'].dt.strftime('%d/%m/%Y')
-resumen_archivos['Hasta'] = resumen_archivos['Hasta'].dt.strftime('%d/%m/%Y')
-resumen_archivos.columns = ['Planilla', 'Filas', 'Desde', 'Hasta']
-
 st.sidebar.success(f"📁 **{len(resumen_archivos)} planillas activas**")
 with st.sidebar.expander("📄 Cobertura por planilla"):
-    st.dataframe(resumen_archivos, use_container_width=True, hide_index=True)
+    st.dataframe(resumen_archivos, hide_index=True, **ANCHO)
 
 # ---------------------------------------------------------
 # FILTROS DINÁMICOS
 # ---------------------------------------------------------
 st.sidebar.markdown("### 🔎 Filtros de Búsqueda")
-meses_disponibles = [m for m in MESES_ORDEN if m in set(df_raw['mes_nombre'].dropna())]
-meses_disponibles += sorted(set(df_raw['mes_nombre'].dropna()) - set(MESES_ORDEN))
-meses_sel = st.sidebar.multiselect("Mes:", meses_disponibles, default=meses_disponibles)
+
+# Los períodos llevan año ("2026-01 · Enero"), así que ordenan solos y soportan varios años.
+periodos_disponibles = sorted(p for p in df_raw['periodo'].dropna().unique() if p != 'Sin Período')
+if 'Sin Período' in set(df_raw['periodo'].dropna()):
+    periodos_disponibles.append('Sin Período')
+periodos_sel = st.sidebar.multiselect("Período:", periodos_disponibles, default=periodos_disponibles)
 
 asesores_disponibles = sorted(df_raw['user'].dropna().unique())
 asesores_sel = st.sidebar.multiselect("Asesor:", asesores_disponibles, default=asesores_disponibles)
 
+brokers_disponibles = sorted({b for lista in df_raw['brokers'] for b in lista})
+brokers_sel = st.sidebar.multiselect("Broker:", brokers_disponibles, default=brokers_disponibles,
+                                     help="Un chat con varias etiquetas de broker aparece si coincide con alguna.")
+
 df = df_raw.copy()
-if meses_sel: df = df[df['mes_nombre'].isin(meses_sel)]
+if periodos_sel: df = df[df['periodo'].isin(periodos_sel)]
 if asesores_sel: df = df[df['user'].isin(asesores_sel)]
+if brokers_sel and len(brokers_sel) < len(brokers_disponibles):
+    df = df[df['brokers'].apply(lambda lista: any(b in brokers_sel for b in lista))]
 
 if df.empty:
-    st.warning("Los filtros actuales no devuelven ningún chat. Ampliá la selección de meses o asesores.")
+    st.warning("Los filtros actuales no devuelven ninguna conversación. Ampliá la selección.")
     st.stop()
 
 # ---------------------------------------------------------
@@ -596,22 +725,40 @@ if df.empty:
 # ---------------------------------------------------------
 ultimo_dato = df_raw['createdAt_dt'].max()
 ultimo_dato_txt = ultimo_dato.strftime('%d/%m/%Y %H:%M') if pd.notna(ultimo_dato) else "s/d"
+periodos_txt = f"{len(periodos_sel)} período(s)" if periodos_sel else "todos los períodos"
 
 st.markdown(f"""
 <div class="bdi-header">
     <h1>📈 Dashboard de Gestión de Mensajería</h1>
     <p>BDI Consultora — Consolidado analítico de conversaciones, rendimiento operativo por asesor y distribución patrimonial.</p>
     <span class="bdi-badge">Último chat en la base: {ultimo_dato_txt}</span>
+    <span class="bdi-badge">Analizando: {periodos_txt}</span>
     <span class="bdi-badge">Tablero generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}</span>
 </div>
 """, unsafe_allow_html=True)
 
+total_conv = df[COL_ID].nunique()
+contactos_unicos = df['contactNumber'].nunique()
+ratio_chats_contacto = total_conv / contactos_unicos if contactos_unicos else np.nan
+
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
-kpi1.metric("Total Chats", f"{len(df):,}")
-kpi2.metric("Contactos Únicos", f"{df['contactNumber'].nunique():,}")
-kpi3.metric("Nuevos Contactos", f"{df['isNewContact'].sum():,}")
-kpi4.metric("FRT Mediano", f"{df['FRT_min'].median():.1f} min" if not df['FRT_min'].dropna().empty else "s/d")
-kpi5.metric("Cierre Inactividad", f"{df['resolvedByInactivity'].sum():,}")
+kpi1.metric("Total Chats", f"{total_conv:,}")
+kpi2.metric("Contactos Únicos", f"{contactos_unicos:,}")
+kpi3.metric("Nuevos Contactos", f"{int(df['isNewContact'].sum()):,}")
+kpi4.metric("FRT Mediano", f"{df['FRT_min'].median():.1f} min" if df['FRT_min'].notna().any() else "s/d")
+kpi5.metric("Cierre Inactividad", f"{int(df['resolvedByInactivity'].sum()):,}")
+
+kpi6, kpi7, kpi8, kpi9, kpi10 = st.columns(5)
+kpi6.metric("Chats por Contacto", f"{ratio_chats_contacto:.2f}" if pd.notna(ratio_chats_contacto) else "s/d",
+            help="Conversaciones totales dividido contactos únicos.")
+kpi7.metric("Resolución Mediana", f"{df['res_time_wh_min'].median():.0f} min" if df['res_time_wh_min'].notna().any() else "s/d",
+            help="Mediana del tiempo de resolución en horario laboral. Se usa mediana porque unos pocos chats de varios días distorsionan el promedio.")
+kpi8.metric("Iniciados por Cliente", f"{df['startedByContact'].mean()*100:.0f}%" if len(df) else "s/d",
+            help="Porcentaje de conversaciones que abrió el cliente y no el asesor.")
+kpi9.metric("Sin Responder", f"{int(df['FRT_min'].isna().sum()):,}",
+            help="Conversaciones sin `firstSentMessageAt`: nunca se envió un primer mensaje desde BDI.")
+kpi10.metric("Días Hábiles", f"{dias_habiles_efectivos(df['createdAt_dt']):,}",
+             help="Días hábiles reales de los períodos seleccionados, sin fines de semana ni feriados AR.")
 
 st.write("")
 
@@ -630,19 +777,17 @@ with tab1:
     section_header("VOLUMEN", "Evolución de Chats en el Tiempo")
     col_t1, col_t2 = st.columns(2)
     with col_t1:
-        df_mes = df.groupby('mes_nombre').size().reset_index(name='Chats')
-        df_mes['orden'] = df_mes['mes_nombre'].apply(
-            lambda m: meses_disponibles.index(m) if m in meses_disponibles else 99)
-        df_mes = df_mes.sort_values('orden')
+        df_mes = df.groupby('periodo')[COL_ID].nunique().reset_index(name='Chats')
+        df_mes = df_mes.sort_values('periodo')
         fig_mes = px.bar(
-            df_mes, x='mes_nombre', y='Chats', text='Chats',
+            df_mes, x='periodo', y='Chats', text='Chats',
             color_discrete_sequence=['#157347'], title="Evolución Mensual de Chats",
-            category_orders={'mes_nombre': meses_disponibles}
+            category_orders={'periodo': periodos_disponibles}
         )
         fig_mes.update_traces(textposition='outside')
         fig_mes = apply_bdi_theme(fig_mes)
-        fig_mes.update_layout(xaxis_title="Mes", yaxis_title="Cantidad de Chats")
-        st.plotly_chart(fig_mes, use_container_width=True)
+        fig_mes.update_layout(xaxis_title="Período", yaxis_title="Cantidad de Chats", xaxis=dict(tickangle=-30))
+        st.plotly_chart(fig_mes, **ANCHO)
 
     with col_t2:
         df_dias = df['dia_semana'].value_counts().reindex(DAY_ORDER_LABORAL).fillna(0).reset_index()
@@ -654,7 +799,19 @@ with tab1:
         fig_dias.update_traces(textposition='outside')
         fig_dias = apply_bdi_theme(fig_dias)
         fig_dias.update_layout(xaxis_title="Día", yaxis_title="Cantidad de Chats")
-        st.plotly_chart(fig_dias, use_container_width=True)
+        st.plotly_chart(fig_dias, **ANCHO)
+
+    if df['fecha_corta'].notna().any():
+        df_diario = df.groupby('fecha_corta')[COL_ID].nunique().reset_index(name='Chats')
+        fig_diario = px.line(
+            df_diario, x='fecha_corta', y='Chats',
+            color_discrete_sequence=['#0F5132'], title="Serie Diaria de Conversaciones"
+        )
+        fig_diario.update_traces(line=dict(width=2))
+        fig_diario = add_reference_line(fig_diario, df_diario['Chats'].mean(), orientation='h', label='Promedio diario')
+        fig_diario = apply_bdi_theme(fig_diario)
+        fig_diario.update_layout(xaxis_title="Fecha", yaxis_title="Conversaciones", height=330)
+        st.plotly_chart(fig_diario, **ANCHO)
 
     section_header("CARGA HORARIA", "Distribución de Consultas por Hora")
     df_hora = df.groupby('hora').size().reset_index(name='Chats')
@@ -665,7 +822,7 @@ with tab1:
     fig_hora.update_traces(marker=dict(size=8, color='#0F5132'), fillcolor='rgba(58,175,185,0.15)', line=dict(color='#0F5132'))
     fig_hora = apply_bdi_theme(fig_hora)
     fig_hora.update_layout(xaxis_title="Hora del día", yaxis_title="Cantidad de Chats", xaxis=dict(dtick=1))
-    st.plotly_chart(fig_hora, use_container_width=True)
+    st.plotly_chart(fig_hora, **ANCHO)
 
     df_hora_30 = df[(df['hora'] >= 8) & (df['hora'] <= 18)].groupby('hora_30m').size().reset_index(name='Chats')
     fig_hora_30 = px.area(
@@ -675,7 +832,7 @@ with tab1:
     fig_hora_30.update_traces(marker=dict(size=8, color='#0F5132'), fillcolor='rgba(21,115,71,0.15)', line=dict(color='#0F5132'))
     fig_hora_30 = apply_bdi_theme(fig_hora_30)
     fig_hora_30.update_layout(xaxis_title="Franja horaria", yaxis_title="Cantidad de Chats", xaxis=dict(tickangle=-45))
-    st.plotly_chart(fig_hora_30, use_container_width=True)
+    st.plotly_chart(fig_hora_30, **ANCHO)
 
 # ---------------------------------------------------------
 # TAB 2: BROKERS Y PATRIMONIO
@@ -697,7 +854,7 @@ with tab2:
         fig_broker.update_traces(textinfo='percent', textposition='inside')
         fig_broker = apply_bdi_theme(fig_broker, legend_below=True)
         fig_broker.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_broker, use_container_width=True)
+        st.plotly_chart(fig_broker, **ANCHO)
 
     with col_b2:
         tier_counts = df['tier'].value_counts().reset_index()
@@ -711,7 +868,7 @@ with tab2:
         fig_tier.update_traces(textinfo='percent', textposition='inside')
         fig_tier = apply_bdi_theme(fig_tier, legend_below=True)
         fig_tier.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_tier, use_container_width=True)
+        st.plotly_chart(fig_tier, **ANCHO)
 
     divider()
 
@@ -728,7 +885,7 @@ with tab2:
         fig_broker_filt.update_traces(textinfo='percent', textposition='inside')
         fig_broker_filt = apply_bdi_theme(fig_broker_filt, legend_below=True)
         fig_broker_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_broker_filt, use_container_width=True)
+        st.plotly_chart(fig_broker_filt, **ANCHO)
 
     with col_b4:
         tier_counts_filt = df[df['tier'] != 'Sin Etiqueta Monto']['tier'].value_counts().reset_index()
@@ -742,7 +899,7 @@ with tab2:
         fig_tier_filt.update_traces(textinfo='percent', textposition='inside')
         fig_tier_filt = apply_bdi_theme(fig_tier_filt, legend_below=True)
         fig_tier_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_tier_filt, use_container_width=True)
+        st.plotly_chart(fig_tier_filt, **ANCHO)
 
     divider()
 
@@ -760,7 +917,7 @@ with tab2:
         fig_broker_usr.update_traces(textinfo='percent', textposition='inside')
         fig_broker_usr = apply_bdi_theme(fig_broker_usr, legend_below=True)
         fig_broker_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_broker_usr, use_container_width=True)
+        st.plotly_chart(fig_broker_usr, **ANCHO)
 
     with col_b6:
         unique_tiers = df[df['tier'] != 'Sin Etiqueta Monto'].drop_duplicates(subset=['contactNumber', 'tier'])
@@ -775,7 +932,40 @@ with tab2:
         fig_tier_usr.update_traces(textinfo='percent', textposition='inside')
         fig_tier_usr = apply_bdi_theme(fig_tier_usr, legend_below=True)
         fig_tier_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_tier_usr, use_container_width=True)
+        st.plotly_chart(fig_tier_usr, **ANCHO)
+
+    divider()
+
+    section_header("SERVICIOS", "Etiquetas Comerciales",
+                   subtitle="Membresía, Agro, Consultoría y demás etiquetas del CRM que no son broker ni segmento.")
+    df_serv = df.explode('servicios').dropna(subset=['servicios'])
+    if not df_serv.empty:
+        col_s1, col_s2 = st.columns(2)
+        with col_s1:
+            serv_counts = df_serv.groupby('servicios')[COL_ID].nunique().reset_index(name='Chats')
+            fig_serv = px.bar(
+                serv_counts.sort_values('Chats'), x='Chats', y='servicios', orientation='h', text='Chats',
+                color='servicios', color_discrete_map=SERVICIO_COLORS,
+                title="Conversaciones por Servicio"
+            )
+            fig_serv.update_traces(textposition='outside', cliponaxis=False)
+            fig_serv = apply_bdi_theme(fig_serv)
+            fig_serv.update_layout(showlegend=False, xaxis_title="Conversaciones", yaxis_title="")
+            st.plotly_chart(fig_serv, **ANCHO)
+        with col_s2:
+            serv_users = df_serv.drop_duplicates(subset=['contactNumber', 'servicios'])
+            serv_u = serv_users.groupby('servicios')['contactNumber'].nunique().reset_index(name='Contactos')
+            fig_serv_u = px.bar(
+                serv_u.sort_values('Contactos'), x='Contactos', y='servicios', orientation='h', text='Contactos',
+                color='servicios', color_discrete_map=SERVICIO_COLORS,
+                title="Contactos Únicos por Servicio"
+            )
+            fig_serv_u.update_traces(textposition='outside', cliponaxis=False)
+            fig_serv_u = apply_bdi_theme(fig_serv_u)
+            fig_serv_u.update_layout(showlegend=False, xaxis_title="Contactos únicos", yaxis_title="")
+            st.plotly_chart(fig_serv_u, **ANCHO)
+    else:
+        st.info("No hay etiquetas de servicio en la selección actual.")
 
     divider()
 
@@ -797,7 +987,7 @@ with tab2:
         xaxis_title="Cantidad de Chats", yaxis_title="Broker", legend_title="Segmento (USD)",
         height=780, margin=dict(t=60, b=90, l=60, r=60)
     )
-    st.plotly_chart(fig_tier_broker, use_container_width=True)
+    st.plotly_chart(fig_tier_broker, **ANCHO)
 
 # ---------------------------------------------------------
 # TAB 3: CLIENTES
@@ -805,7 +995,7 @@ with tab2:
 with tab3:
     section_header("RANKING", "Top 10 Clientes con Mayor Interacción")
     df_clients_all = df.groupby(['contactName', 'contactNumber']).agg(
-        Total_Chats=('chatId', 'count'),
+        Total_Chats=(COL_ID, 'nunique'),
         Asesor_Habitual=('user', lambda x: x.mode()[0] if not x.mode().empty else ''),
         Segmento_Monto=('tier', lambda x: x.mode()[0] if not x.mode().empty else '')
     ).reset_index()
@@ -820,7 +1010,7 @@ with tab3:
     fig_top10.update_traces(textposition='outside', cliponaxis=False)
     fig_top10 = apply_bdi_theme(fig_top10, legend_below=True)
     fig_top10.update_layout(height=600, margin=dict(t=60, b=90, l=140, r=60))
-    st.plotly_chart(fig_top10, use_container_width=True)
+    st.plotly_chart(fig_top10, **ANCHO)
 
     divider()
 
@@ -852,7 +1042,7 @@ with tab3:
             'contactName': 'Nombre del Cliente', 'contactNumber': 'Número de Teléfono',
             'Total_Chats': 'Total Chats', 'Asesor_Habitual': 'Asesor Principal', 'Segmento_Monto': 'Segmento Patrimonial'
         }),
-        use_container_width=True, hide_index=True, height=420
+        hide_index=True, **ANCHO, height=420
     )
 
 # ---------------------------------------------------------
@@ -861,25 +1051,14 @@ with tab3:
 with tab4:
     section_header("EFICIENCIA", "Desempeño Operativo por Asesor")
 
-    total_general_chats = len(df)
+    total_general_chats = df[COL_ID].nunique()
+    base_dias = dias_habiles_efectivos(df['createdAt_dt'])
 
-    if not df['createdAt_dt'].dropna().empty:
-        min_date = df['createdAt_dt'].min().date()
-        max_date = df['createdAt_dt'].max().date()
-        years = df['createdAt_dt'].dt.year.dropna().unique().tolist()
-        years = [int(y) for y in years if y > 2000]
-        ar_holidays = holidays.AR(years=years) if years else holidays.AR()
-
-        all_dates = pd.date_range(start=min_date, end=max_date)
-        dias_laborales = [d for d in all_dates if d.weekday() < 5 and d.date() not in ar_holidays]
-        base_dias = len(dias_laborales) if len(dias_laborales) > 0 else 1
-    else:
-        base_dias = 1
-
-    st.caption(f"📅 **Base de cálculo temporal:** {base_dias} días hábiles (excluye fines de semana y feriados de Argentina) · Jornada de 8 hs.")
+    st.caption(f"📅 **Base de cálculo temporal:** {base_dias} días hábiles reales de los períodos seleccionados "
+               "(excluye fines de semana y feriados de Argentina, y respeta meses incompletos) · Jornada de 8 hs.")
 
     df_user_eff = df.groupby('user').agg(
-        Total_Chats=('chatId', 'count'),
+        Total_Chats=(COL_ID, 'nunique'),
         FRT_Mediano_Min=('FRT_min', 'median'),
         Contactos_Nuevos=('isNewContact', 'sum')
     ).reset_index()
@@ -912,7 +1091,7 @@ with tab4:
             "Nuevos Contactos (#)": st.column_config.NumberColumn(help="Cantidad absoluta de nuevos clientes."),
             "Nuevos Contactos (%)": st.column_config.NumberColumn(help="Porcentaje de clientes que escribieron por primera vez.")
         },
-        use_container_width=True, hide_index=True
+        hide_index=True, **ANCHO
     )
 
     divider()
@@ -928,7 +1107,7 @@ with tab4:
         fig_pie.update_traces(textinfo='percent', textposition='inside')
         fig_pie = apply_bdi_theme(fig_pie, legend_below=True)
         fig_pie.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, **ANCHO)
 
     with col_u2:
         fig_frt = px.bar(
@@ -940,7 +1119,7 @@ with tab4:
         fig_frt.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
         fig_frt = apply_bdi_theme(fig_frt)
         fig_frt.update_layout(showlegend=False, xaxis_title="Minutos", yaxis_title="", margin=dict(t=60, b=40, l=100, r=60))
-        st.plotly_chart(fig_frt, use_container_width=True)
+        st.plotly_chart(fig_frt, **ANCHO)
 
     divider()
 
@@ -964,7 +1143,7 @@ with tab4:
                 margin=dict(t=45, b=15, l=30, r=30),
                 title_font=dict(color='#0F5132', size=15)
             )
-            cols_pie[idx % 3].plotly_chart(fig_p, use_container_width=True)
+            cols_pie[idx % 3].plotly_chart(fig_p, **ANCHO)
         st.caption("💡 Pasá el cursor sobre cada porción para ver el detalle exacto por segmento y asesor.")
     else:
         st.info("No hay datos de patrimonio etiquetados para mostrar bajo los filtros actuales.")
@@ -972,55 +1151,76 @@ with tab4:
     divider()
 
     section_header("SATURACIÓN", "Picos de Actividad por Día y Hora")
-    st.caption("Excluye fines de semana · Horario comercial (8 a 18 hs) · El color indica volumen absoluto; el porcentaje, el peso relativo del día.")
+    st.caption("Excluye fines de semana · Horario comercial (8 a 18 hs) · La intensidad del verde indica el volumen absoluto; el porcentaje, el peso de esa franja dentro del día.")
 
     df_heatmap = df[(df['hora'] >= 8) & (df['hora'] <= 18) & (~df['dia_semana'].isin(['Sábado', 'Domingo']))]
 
     if not df_heatmap.empty:
-        heatmap_counts = df_heatmap.groupby(['dia_semana', 'hora']).size().reset_index(name='Chats')
+        heatmap_counts = df_heatmap.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
         totals_per_day = heatmap_counts.groupby('dia_semana')['Chats'].transform('sum')
         heatmap_counts['Porcentaje'] = (heatmap_counts['Chats'] / totals_per_day * 100).round(1)
 
-        heatmap_data = heatmap_counts.pivot(index='dia_semana', columns='hora', values='Chats').reindex(DAY_ORDER_LABORAL).fillna(0)
-        heatmap_pct = heatmap_counts.pivot(index='dia_semana', columns='hora', values='Porcentaje').reindex(DAY_ORDER_LABORAL).fillna(0)
+        horas = list(range(8, 19))
+        heatmap_data = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Chats')
+                        .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
+        heatmap_pct = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Porcentaje')
+                       .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
 
         z = heatmap_data.values
         zmax = z.max() if z.max() > 0 else 1
+        etiquetas_x = [f"{h:02d}h" for h in horas]
 
         fig_heatmap = go.Figure(data=go.Heatmap(
             z=z,
-            x=[f"{h:02d}:00" for h in heatmap_data.columns],
-            y=heatmap_data.index,
-            colorscale=[[0.0, '#F4F9F6'], [0.5, '#8FBF74'], [1.0, '#0F5132']],
-            colorbar=dict(title="Chats", thickness=14, len=0.8),
-            hovertemplate="<b>%{y}, %{x}</b><br>Chats: %{z}<extra></extra>",
+            x=etiquetas_x,
+            y=list(heatmap_data.index),
+            customdata=heatmap_pct.values,
+            colorscale=BDI_HEATSCALE,
+            xgap=4, ygap=4,
+            colorbar=dict(
+                title=dict(text="Chats", font=dict(color='#0F5132', size=12)),
+                thickness=12, len=0.75, outlinewidth=0, tickfont=dict(color='#4A5D57', size=11),
+                ticks="outside", ticklen=4, tickcolor='#DDE5E1'
+            ),
+            hovertemplate="<b>%{y} · %{x}</b><br>Conversaciones: %{z}<br>Peso del día: %{customdata:.1f}%<extra></extra>",
             zmin=0, zmax=zmax
         ))
 
         annotations = []
         for i, day in enumerate(heatmap_data.index):
-            for j, hour in enumerate(heatmap_data.columns):
+            for j, hour in enumerate(horas):
                 val = z[i][j]
+                if val == 0:
+                    continue
                 pct = heatmap_pct.values[i][j]
-                intensity = val / zmax if zmax > 0 else 0
-                text_color = '#FFFFFF' if intensity > 0.55 else '#1A252C'
+                intensity = val / zmax
+                text_color = '#FFFFFF' if intensity > 0.60 else '#14382A'
                 annotations.append(dict(
-                    x=f"{hour:02d}:00", y=day,
-                    text=f"<b>{int(val)}</b><br>{pct:.0f}%",
+                    x=etiquetas_x[j], y=day,
+                    text=f"<b>{int(val)}</b><br><span style='font-size:9px;opacity:0.85'>{pct:.0f}%</span>",
                     showarrow=False,
-                    font=dict(color=text_color, size=10.5),
+                    font=dict(color=text_color, size=12, family='Inter, Segoe UI, sans-serif'),
                     align="center"
                 ))
+
         fig_heatmap.update_layout(annotations=annotations)
-        fig_heatmap.update_xaxes(title="Hora del día", side="bottom")
-        fig_heatmap.update_yaxes(title="Día de la semana")
         fig_heatmap = apply_bdi_theme(fig_heatmap)
+        fig_heatmap.update_xaxes(title="Hora del día", side="top", showgrid=False,
+                                 tickfont=dict(color='#0F5132', size=12), ticks="")
+        fig_heatmap.update_yaxes(title="", showgrid=False, autorange="reversed",
+                                 tickfont=dict(color='#0F5132', size=13), ticks="")
         fig_heatmap.update_layout(
-            title=dict(text="Distribución de Carga de Trabajo (Horario Comercial)", font=dict(color='#0F5132', size=17), x=0.01),
-            height=420,
-            margin=dict(t=60, b=50, l=110, r=40)
+            title=dict(text="Distribución de Carga de Trabajo (Horario Comercial)",
+                       font=dict(color='#0F5132', size=17), x=0.01),
+            height=430,
+            plot_bgcolor='#FBFDFC',
+            margin=dict(t=90, b=30, l=110, r=40)
         )
-        st.plotly_chart(fig_heatmap, use_container_width=True)
+        st.plotly_chart(fig_heatmap, **ANCHO)
+
+        pico = heatmap_counts.loc[heatmap_counts['Chats'].idxmax()]
+        st.caption(f"🔥 **Pico de demanda:** {pico['dia_semana']} a las {int(pico['hora']):02d}:00 hs "
+                   f"con {int(pico['Chats'])} conversaciones ({pico['Porcentaje']:.0f}% del día).")
     else:
         st.info("No hay chats registrados en horario comercial para la selección actual.")
 
@@ -1032,12 +1232,12 @@ with tab5:
     df_exp_5['brokers'] = df_exp_5['brokers'].fillna('Sin Broker')
 
     section_header("RESUMEN EJECUTIVO", "Fricción y Complejidad de un Vistazo")
-    contactos_unicos = df['contactNumber'].nunique()
-    ratio_global = (len(df) / contactos_unicos) if contactos_unicos > 0 else np.nan
-    res_time_prom = df['res_time_wh_min'].mean()
+    contactos_unicos_5 = df['contactNumber'].nunique()
+    ratio_global = (df[COL_ID].nunique() / contactos_unicos_5) if contactos_unicos_5 > 0 else np.nan
+    res_time_med = df['res_time_wh_min'].median()
 
     df_brk_ratio_kpi = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers').agg(
-        Chats=('chatId', 'count'), Usuarios=('contactNumber', 'nunique')
+        Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
     )
     df_brk_ratio_kpi['Ratio'] = df_brk_ratio_kpi['Chats'] / df_brk_ratio_kpi['Usuarios']
     broker_mas_dependiente = df_brk_ratio_kpi['Ratio'].idxmax() if not df_brk_ratio_kpi.empty else "—"
@@ -1047,7 +1247,7 @@ with tab5:
 
     kf1, kf2, kf3, kf4 = st.columns(4)
     kf1.metric("Ratio Global de Fricción", f"{ratio_global:.2f} chats/cliente" if pd.notna(ratio_global) else "s/d", help="Promedio de chats por cliente único.")
-    kf2.metric("Resolución Promedio", f"{res_time_prom:.0f} min" if pd.notna(res_time_prom) else "s/d", help="Tiempo promedio de resolución en horario laboral.")
+    kf2.metric("Resolución Mediana", f"{res_time_med:.0f} min" if pd.notna(res_time_med) else "s/d", help="Mediana del tiempo de resolución en horario laboral. La mediana evita que unos pocos chats de varios días distorsionen el número.")
     kf3.metric("Broker Más Dependiente", broker_mas_dependiente, help="Broker con mayor promedio de consultas por cliente.")
     kf4.metric("Segmento Más Lento (FRT)", segmento_mas_lento, help="Segmento patrimonial con la mediana de respuesta inicial más lenta.")
 
@@ -1061,7 +1261,7 @@ with tab5:
     col_f1, col_f2 = st.columns(2)
     with col_f1:
         df_fric_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers').agg(
-            Chats=('chatId', 'count'), Usuarios=('contactNumber', 'nunique')
+            Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
         ).reset_index()
         df_fric_broker['Ratio'] = df_fric_broker['Chats'] / df_fric_broker['Usuarios']
 
@@ -1074,11 +1274,11 @@ with tab5:
         fig_fric_b = add_reference_line(fig_fric_b, df_fric_broker['Ratio'].mean(), orientation='v')
         fig_fric_b = apply_bdi_theme(fig_fric_b)
         fig_fric_b.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Broker", showlegend=False)
-        st.plotly_chart(fig_fric_b, use_container_width=True)
+        st.plotly_chart(fig_fric_b, **ANCHO)
 
     with col_f2:
         df_fric_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier').agg(
-            Chats=('chatId', 'count'), Usuarios=('contactNumber', 'nunique')
+            Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
         ).reset_index()
         df_fric_tier['Ratio'] = df_fric_tier['Chats'] / df_fric_tier['Usuarios']
 
@@ -1091,7 +1291,7 @@ with tab5:
         fig_fric_t = add_reference_line(fig_fric_t, df_fric_tier['Ratio'].mean(), orientation='v')
         fig_fric_t = apply_bdi_theme(fig_fric_t)
         fig_fric_t.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Segmento Patrimonial", showlegend=False)
-        st.plotly_chart(fig_fric_t, use_container_width=True)
+        st.plotly_chart(fig_fric_t, **ANCHO)
 
     divider()
 
@@ -1102,19 +1302,19 @@ with tab5:
 
     col_c1, col_c2 = st.columns(2)
     with col_c1:
-        df_comp_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers')['res_time_wh_min'].mean().reset_index()
+        df_comp_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers')['res_time_wh_min'].median().reset_index()
 
         fig_comp_b = px.bar(
             df_comp_broker.sort_values('res_time_wh_min', ascending=True),
             x='res_time_wh_min', y='brokers', orientation='h', text='res_time_wh_min',
             color='brokers', color_discrete_map=BROKER_COLORS,
-            title="Tiempo Promedio de Resolución por Broker"
+            title="Tiempo Mediano de Resolución por Broker"
         )
         fig_comp_b.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
         fig_comp_b = add_reference_line(fig_comp_b, df_comp_broker['res_time_wh_min'].mean(), orientation='v')
         fig_comp_b = apply_bdi_theme(fig_comp_b)
-        fig_comp_b.update_layout(xaxis_title="Minutos Promedio en Horario Laboral", yaxis_title="Broker", showlegend=False)
-        st.plotly_chart(fig_comp_b, use_container_width=True)
+        fig_comp_b.update_layout(xaxis_title="Minutos (Mediana) en Horario Laboral", yaxis_title="Broker", showlegend=False)
+        st.plotly_chart(fig_comp_b, **ANCHO)
 
     with col_c2:
         df_comp_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median().reset_index()
@@ -1128,6 +1328,7 @@ with tab5:
         fig_comp_t = add_reference_line(fig_comp_t, df_comp_tier['FRT_min'].mean(), orientation='v')
         fig_comp_t = apply_bdi_theme(fig_comp_t)
         fig_comp_t.update_layout(xaxis_title="Minutos (Mediana)", yaxis_title="Segmento Patrimonial", showlegend=False)
-        st.plotly_chart(fig_comp_t, use_container_width=True)
+        st.plotly_chart(fig_comp_t, **ANCHO)
 
-    st.caption("🟡 La línea punteada dorada marca el promedio del grupo.")
+    st.caption("🟡 La línea punteada dorada marca el promedio del grupo. Los tiempos usan **mediana**: "
+               "unas pocas conversaciones que quedan abiertas varios días vuelven engañoso el promedio simple.")
