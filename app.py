@@ -182,9 +182,18 @@ BDI_HEATSCALE = [
 ]
 
 # Etiquetas comerciales que no son broker ni segmento patrimonial.
-SERVICIOS = ['Membresia', 'Agro', 'Consultoria', 'Potencial Cliente', '+1 Cuenta']
-SERVICIO_COLORS = {'Membresia': '#0F5132', 'Agro': '#8FBF74', 'Consultoria': '#3AAFB9',
-                   'Potencial Cliente': '#C9A227', '+1 Cuenta': '#2FA66B'}
+# ORDEN = PRIORIDAD: la primera que matchea gana, así "Membresia PLUS" no cae en "Membresia".
+SERVICIOS = ['Membresia PLUS', 'Membresia', 'Premium', 'Agro', 'Consultoria', '+1 Cuenta']
+SERVICIO_COLORS = {'Membresia PLUS': '#0B3D27', 'Membresia': '#157347', 'Premium': '#C9A227',
+                   'Agro': '#8FBF74', 'Consultoria': '#3AAFB9', '+1 Cuenta': '#2FA66B'}
+
+# Estado comercial del contacto (clave para leer la conexión Comercial).
+ESTADOS = ['Potencial Cliente', 'EX CLIENTE', 'no es cliente']
+ESTADO_COLORS = {'Potencial Cliente': '#C9A227', 'EX CLIENTE': '#AEB6B2', 'no es cliente': '#D6336C'}
+
+# Conexiones (líneas de WhatsApp). Los colores se asignan por volumen en runtime,
+# así una línea nueva se pinta sola sin tocar el código.
+CONEXION_PALETA = ['#0F5132', '#C9A227', '#3AAFB9', '#8FBF74', '#D6336C', '#0B3D66', '#5BC49A']
 
 NOMBRE_A_NUM = {
     'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
@@ -287,11 +296,24 @@ def etiqueta_periodo(ts):
         return 'Sin Período'
     return f"{ts.year}-{ts.month:02d} · {NOMBRE_MES[ts.month]}"
 
-def extract_servicios(tag_str):
+def extract_etiquetas(tag_str, catalogo):
+    """Primera coincidencia gana, respetando el orden del catálogo.
+
+    Evita que 'Membresia PLUS' se cuente además como 'Membresia'.
+    """
     if pd.isna(tag_str):
         return []
-    tags = [t.strip().lower() for t in str(tag_str).split(',')]
-    return [s for s in SERVICIOS if any(s.lower() == t or s.lower() in t for t in tags)]
+    encontradas = []
+    for bruta in str(tag_str).split(','):
+        t = bruta.strip().lower()
+        if not t:
+            continue
+        for etiqueta in catalogo:
+            if etiqueta.lower() in t:
+                if etiqueta not in encontradas:
+                    encontradas.append(etiqueta)
+                break
+    return encontradas
 
 def extract_brokers(tag_str):
     if pd.isna(tag_str): return []
@@ -517,6 +539,32 @@ def dias_habiles_efectivos(serie_fechas):
                 dias.add(d.date())
     return max(len(dias), 1)
 
+def resumen_por_conexion(df):
+    """Métricas normalizadas por línea. Cada conexión se mide sobre SUS días activos,
+    porque una línea nueva arranca a mitad de mes y el volumen crudo no es comparable."""
+    filas = []
+    for conexion, g in df.groupby('conexion'):
+        conv = g[COL_ID].nunique()
+        contactos = g['contactNumber'].nunique()
+        dias = dias_habiles_efectivos(g['createdAt_dt'])
+        filas.append({
+            'Conexión': conexion,
+            'Conversaciones': conv,
+            'Contactos': contactos,
+            'Chats/Contacto': conv / contactos if contactos else np.nan,
+            'Días Hábiles': dias,
+            'Chats/Día': conv / dias if dias else np.nan,
+            '% Nuevos': g['isNewContact'].mean() * 100,
+            'FRT Mediano': g['FRT_min'].median(),
+            '% Sin Responder': g['FRT_min'].isna().mean() * 100,
+            'Resolución Mediana': g['res_time_wh_min'].median(),
+            '% Inicia Cliente': g['startedByContact'].mean() * 100,
+            'Desde': g['createdAt_dt'].min(),
+            'Hasta': g['createdAt_dt'].max(),
+        })
+    res = pd.DataFrame(filas).sort_values('Conversaciones', ascending=False).reset_index(drop=True)
+    return res
+
 def procesar(df, dedup=True):
     """Normaliza y deriva columnas. Se aplica UNA sola vez sobre Drive + subidas manuales."""
     log = []
@@ -580,7 +628,30 @@ def procesar(df, dedup=True):
     # --- Etiquetas
     df['brokers'] = col_segura(df, 'tags').apply(extract_brokers)
     df['tier'] = col_segura(df, 'tags').apply(extract_tier)
-    df['servicios'] = col_segura(df, 'tags').apply(extract_servicios)
+    df['servicios'] = col_segura(df, 'tags').apply(lambda t: extract_etiquetas(t, SERVICIOS))
+    df['estados'] = col_segura(df, 'tags').apply(lambda t: extract_etiquetas(t, ESTADOS))
+
+    # --- Conexiones (líneas de WhatsApp)
+    # Se agrupan por `connectionId`, NO por el nombre: el CRM permite renombrar la línea
+    # y el mismo número figuró como "Conexión principal" y después como "Asesores BDI".
+    # Sin esto, una misma línea aparecería partida en dos series a lo largo del año.
+    if 'connectionId' in df.columns and df['connectionId'].notna().any():
+        con_id = df.dropna(subset=['connectionId']).sort_values('createdAt_dt')
+        nombres_actuales = con_id.groupby('connectionId')['connection'].last()
+        df['conexion'] = df['connectionId'].map(nombres_actuales)
+        df['conexion'] = df['conexion'].fillna(col_segura(df, 'connection')).fillna('Sin Conexión')
+
+        historicos = con_id.groupby('connectionId')['connection'].nunique()
+        for cid, cant in historicos[historicos > 1].items():
+            previos = sorted(set(con_id[con_id['connectionId'] == cid]['connection'].dropna()))
+            actual = nombres_actuales[cid]
+            otros = [p for p in previos if p != actual]
+            log.append(("ok", f"La línea «{actual}» figuró antes como {', '.join(otros)}: "
+                              "se unifica por `connectionId` para no partir la serie histórica."))
+    else:
+        df['conexion'] = col_segura(df, 'connection').fillna('Sin Conexión')
+
+    df['departamento'] = col_segura(df, 'department').fillna('Sin Departamento')
 
     # --- Identificadores y flags
     if COL_ID not in df.columns:
@@ -662,11 +733,12 @@ resumen_archivos = df_raw.groupby('archivo_origen').agg(
     Contactos=('contactNumber', 'nunique'),
     Desde=('createdAt_dt', 'min'),
     Hasta=('createdAt_dt', 'max'),
-    Periodos=('periodo', lambda s: ', '.join(sorted(s.dropna().unique())))
+    Periodos=('periodo', lambda s: ', '.join(sorted(s.dropna().unique()))),
+    Conexiones=('conexion', lambda s: ', '.join(sorted(s.dropna().unique())))
 ).reset_index()
 resumen_archivos['Desde'] = resumen_archivos['Desde'].dt.strftime('%d/%m/%Y')
 resumen_archivos['Hasta'] = resumen_archivos['Hasta'].dt.strftime('%d/%m/%Y')
-resumen_archivos.columns = ['Planilla', 'Conversaciones', 'Contactos', 'Desde', 'Hasta', 'Períodos']
+resumen_archivos.columns = ['Planilla', 'Conversaciones', 'Contactos', 'Desde', 'Hasta', 'Períodos', 'Conexiones']
 
 # Aviso si el nombre del archivo declara un mes distinto al de su contenido.
 for _, fila in resumen_archivos.iterrows():
@@ -703,6 +775,20 @@ if 'Sin Período' in set(df_raw['periodo'].dropna()):
     periodos_disponibles.append('Sin Período')
 periodos_sel = st.sidebar.multiselect("Período:", periodos_disponibles, default=periodos_disponibles)
 
+# Conexiones ordenadas por volumen: el color se asigna solo, sin tocar el código
+# cuando se sume una línea nueva.
+conexiones_disponibles = list(
+    df_raw.groupby('conexion')[COL_ID].nunique().sort_values(ascending=False).index
+)
+CONEXION_COLORS = {c: CONEXION_PALETA[i % len(CONEXION_PALETA)]
+                   for i, c in enumerate(conexiones_disponibles)}
+
+conexiones_sel = st.sidebar.multiselect(
+    "Conexión (línea de WhatsApp):", conexiones_disponibles, default=conexiones_disponibles,
+    help="Cada línea es un número distinto. Los asesores atienden en las dos, "
+         "así que el filtro sirve para aislar el rendimiento de cada una."
+)
+
 asesores_disponibles = sorted(df_raw['user'].dropna().unique())
 asesores_sel = st.sidebar.multiselect("Asesor:", asesores_disponibles, default=asesores_disponibles)
 
@@ -712,6 +798,7 @@ brokers_sel = st.sidebar.multiselect("Broker:", brokers_disponibles, default=bro
 
 df = df_raw.copy()
 if periodos_sel: df = df[df['periodo'].isin(periodos_sel)]
+if conexiones_sel: df = df[df['conexion'].isin(conexiones_sel)]
 if asesores_sel: df = df[df['user'].isin(asesores_sel)]
 if brokers_sel and len(brokers_sel) < len(brokers_disponibles):
     df = df[df['brokers'].apply(lambda lista: any(b in brokers_sel for b in lista))]
@@ -733,6 +820,7 @@ st.markdown(f"""
     <p>BDI Consultora — Consolidado analítico de conversaciones, rendimiento operativo por asesor y distribución patrimonial.</p>
     <span class="bdi-badge">Último chat en la base: {ultimo_dato_txt}</span>
     <span class="bdi-badge">Analizando: {periodos_txt}</span>
+    <span class="bdi-badge">Conexiones: {' + '.join(conexiones_sel) if conexiones_sel else 'todas'}</span>
     <span class="bdi-badge">Tablero generado: {datetime.now().strftime('%d/%m/%Y %H:%M')}</span>
 </div>
 """, unsafe_allow_html=True)
@@ -757,13 +845,15 @@ kpi8.metric("Iniciados por Cliente", f"{df['startedByContact'].mean()*100:.0f}%"
             help="Porcentaje de conversaciones que abrió el cliente y no el asesor.")
 kpi9.metric("Sin Responder", f"{int(df['FRT_min'].isna().sum()):,}",
             help="Conversaciones sin `firstSentMessageAt`: nunca se envió un primer mensaje desde BDI.")
-kpi10.metric("Días Hábiles", f"{dias_habiles_efectivos(df['createdAt_dt']):,}",
-             help="Días hábiles reales de los períodos seleccionados, sin fines de semana ni feriados AR.")
+
+kpi10.metric("Conexiones Activas", f"{df['conexion'].nunique()}",
+             help="Líneas de WhatsApp con al menos una conversación en la selección. El detalle está en la pestaña Conexiones.")
 
 st.write("")
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab_con, tab2, tab3, tab4, tab5 = st.tabs([
     "📅  Evolución y Temporalidad",
+    "📞  Conexiones",
     "💼  Brokers y Patrimonio",
     "👥  Clientes",
     "🧑‍💼  Actividad por Usuario",
@@ -777,16 +867,25 @@ with tab1:
     section_header("VOLUMEN", "Evolución de Chats en el Tiempo")
     col_t1, col_t2 = st.columns(2)
     with col_t1:
-        df_mes = df.groupby('periodo')[COL_ID].nunique().reset_index(name='Chats')
-        df_mes = df_mes.sort_values('periodo')
-        fig_mes = px.bar(
-            df_mes, x='periodo', y='Chats', text='Chats',
-            color_discrete_sequence=['#157347'], title="Evolución Mensual de Chats",
-            category_orders={'periodo': periodos_disponibles}
-        )
+        if df['conexion'].nunique() > 1:
+            df_mes = df.groupby(['periodo', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
+            fig_mes = px.bar(
+                df_mes.sort_values('periodo'), x='periodo', y='Chats', text='Chats', color='conexion',
+                color_discrete_map=CONEXION_COLORS, title="Evolución Mensual de Chats por Conexión",
+                category_orders={'periodo': periodos_disponibles}
+            )
+        else:
+            df_mes = df.groupby('periodo')[COL_ID].nunique().reset_index(name='Chats')
+            df_mes = df_mes.sort_values('periodo')
+            fig_mes = px.bar(
+                df_mes, x='periodo', y='Chats', text='Chats',
+                color_discrete_sequence=['#157347'], title="Evolución Mensual de Chats",
+                category_orders={'periodo': periodos_disponibles}
+            )
         fig_mes.update_traces(textposition='outside')
-        fig_mes = apply_bdi_theme(fig_mes)
-        fig_mes.update_layout(xaxis_title="Período", yaxis_title="Cantidad de Chats", xaxis=dict(tickangle=-30))
+        fig_mes = apply_bdi_theme(fig_mes, legend_below=df['conexion'].nunique() > 1)
+        fig_mes.update_layout(xaxis_title="Período", yaxis_title="Cantidad de Chats",
+                              xaxis=dict(tickangle=-30), legend_title="Conexión")
         st.plotly_chart(fig_mes, **ANCHO)
 
     with col_t2:
@@ -802,15 +901,27 @@ with tab1:
         st.plotly_chart(fig_dias, **ANCHO)
 
     if df['fecha_corta'].notna().any():
-        df_diario = df.groupby('fecha_corta')[COL_ID].nunique().reset_index(name='Chats')
-        fig_diario = px.line(
-            df_diario, x='fecha_corta', y='Chats',
-            color_discrete_sequence=['#0F5132'], title="Serie Diaria de Conversaciones"
-        )
-        fig_diario.update_traces(line=dict(width=2))
-        fig_diario = add_reference_line(fig_diario, df_diario['Chats'].mean(), orientation='h', label='Promedio diario')
-        fig_diario = apply_bdi_theme(fig_diario)
-        fig_diario.update_layout(xaxis_title="Fecha", yaxis_title="Conversaciones", height=330)
+        varias_conexiones = df['conexion'].nunique() > 1
+        if varias_conexiones:
+            df_diario = df.groupby(['fecha_corta', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
+            fig_diario = px.area(
+                df_diario, x='fecha_corta', y='Chats', color='conexion',
+                color_discrete_map=CONEXION_COLORS,
+                title="Serie Diaria de Conversaciones (apilada por conexión)"
+            )
+            fig_diario.update_traces(line=dict(width=1.5))
+            fig_diario = apply_bdi_theme(fig_diario, legend_below=True)
+            fig_diario.update_layout(legend_title="Conexión")
+        else:
+            df_diario = df.groupby('fecha_corta')[COL_ID].nunique().reset_index(name='Chats')
+            fig_diario = px.line(
+                df_diario, x='fecha_corta', y='Chats',
+                color_discrete_sequence=['#0F5132'], title="Serie Diaria de Conversaciones"
+            )
+            fig_diario.update_traces(line=dict(width=2))
+            fig_diario = add_reference_line(fig_diario, df_diario['Chats'].mean(), orientation='h', label='Promedio diario')
+            fig_diario = apply_bdi_theme(fig_diario)
+        fig_diario.update_layout(xaxis_title="Fecha", yaxis_title="Conversaciones", height=340)
         st.plotly_chart(fig_diario, **ANCHO)
 
     section_header("CARGA HORARIA", "Distribución de Consultas por Hora")
@@ -833,6 +944,221 @@ with tab1:
     fig_hora_30 = apply_bdi_theme(fig_hora_30)
     fig_hora_30.update_layout(xaxis_title="Franja horaria", yaxis_title="Cantidad de Chats", xaxis=dict(tickangle=-45))
     st.plotly_chart(fig_hora_30, **ANCHO)
+
+
+# ---------------------------------------------------------
+# TAB CONEXIONES: COMPARATIVA ENTRE LÍNEAS DE WHATSAPP
+# ---------------------------------------------------------
+with tab_con:
+    res_con = resumen_por_conexion(df)
+
+    if len(res_con) < 2:
+        unica = res_con.iloc[0]['Conexión'] if not res_con.empty else "—"
+        st.info(f"La selección actual solo incluye la conexión **{unica}**. "
+                "Ampliá el filtro de conexiones o de períodos para comparar líneas entre sí.")
+
+    section_header("PANORAMA", "Rendimiento por Línea de WhatsApp",
+                   subtitle="Cada línea se mide sobre sus propios días activos: una conexión que arrancó "
+                            "a mitad de mes no es comparable en volumen bruto.")
+
+    for _, fila in res_con.iterrows():
+        color = CONEXION_COLORS.get(fila['Conexión'], '#157347')
+        st.markdown(
+            f"<div style='border-left:5px solid {color};background:#FFFFFF;border:1px solid #E5EBE8;"
+            f"border-radius:12px;padding:10px 16px;margin-bottom:10px;'>"
+            f"<b style='color:{color};font-size:1.05rem'>{fila['Conexión']}</b>"
+            f"<span style='color:#5B6E67;font-size:0.85rem'> · activa del "
+            f"{fila['Desde'].strftime('%d/%m/%Y')} al {fila['Hasta'].strftime('%d/%m/%Y')} "
+            f"({int(fila['Días Hábiles'])} días hábiles)</span></div>",
+            unsafe_allow_html=True
+        )
+        c = st.columns(6)
+        c[0].metric("Conversaciones", f"{int(fila['Conversaciones']):,}")
+        c[1].metric("Chats / Día", f"{fila['Chats/Día']:.1f}")
+        c[2].metric("Contactos", f"{int(fila['Contactos']):,}")
+        c[3].metric("% Nuevos", f"{fila['% Nuevos']:.1f}%")
+        c[4].metric("FRT Mediano", f"{fila['FRT Mediano']:.0f} min" if pd.notna(fila['FRT Mediano']) else "s/d")
+        c[5].metric("% Sin Responder", f"{fila['% Sin Responder']:.1f}%")
+        st.write("")
+
+    # Lectura automática: compara la línea principal contra el resto.
+    if len(res_con) >= 2:
+        principal = res_con.iloc[0]
+        lecturas = []
+        for _, otra in res_con.iloc[1:].iterrows():
+            if pd.notna(otra['% Nuevos']) and pd.notna(principal['% Nuevos']) and principal['% Nuevos'] > 0:
+                veces = otra['% Nuevos'] / principal['% Nuevos']
+                if veces >= 1.5:
+                    lecturas.append(
+                        f"**{otra['Conexión']}** trae **{otra['% Nuevos']:.0f}% de contactos nuevos** contra "
+                        f"{principal['% Nuevos']:.0f}% de {principal['Conexión']} ({veces:.0f}× más): "
+                        "funciona como puerta de entrada, no como atención de cartera.")
+            if pd.notna(otra['FRT Mediano']) and pd.notna(principal['FRT Mediano']):
+                if otra['FRT Mediano'] > principal['FRT Mediano'] * 1.3:
+                    lecturas.append(
+                        f"⚠️ **{otra['Conexión']}** responde en **{otra['FRT Mediano']:.0f} min** contra "
+                        f"{principal['FRT Mediano']:.0f} min de {principal['Conexión']}. "
+                        "Si es la línea que capta prospectos, ese retraso pega donde más cuesta.")
+            if pd.notna(otra['% Sin Responder']) and otra['% Sin Responder'] > max(principal['% Sin Responder'] * 1.5, 10):
+                lecturas.append(
+                    f"⚠️ **{otra['Conexión']}** deja **{otra['% Sin Responder']:.0f}% de conversaciones sin "
+                    f"primera respuesta** (vs {principal['% Sin Responder']:.0f}%).")
+        if lecturas:
+            st.info("🔎 **Lectura automática**\n\n" + "\n\n".join(f"- {l}" for l in lecturas))
+
+    divider()
+
+    section_header("TABLA COMPARATIVA", "Todas las Métricas Lado a Lado")
+    tabla = res_con.drop(columns=['Desde', 'Hasta']).copy()
+    st.dataframe(
+        tabla.style.format({
+            'Chats/Contacto': '{:.2f}', 'Chats/Día': '{:.1f}', '% Nuevos': '{:.1f}%',
+            'FRT Mediano': '{:.1f}', '% Sin Responder': '{:.1f}%',
+            'Resolución Mediana': '{:.0f}', '% Inicia Cliente': '{:.0f}%'
+        }),
+        column_config={
+            "Chats/Día": st.column_config.NumberColumn(help="Conversaciones divididas los días hábiles en que ESA línea estuvo activa."),
+            "% Nuevos": st.column_config.NumberColumn(help="Porcentaje de conversaciones con un contacto que escribe por primera vez."),
+            "FRT Mediano": st.column_config.NumberColumn(help="Minutos hasta el primer mensaje enviado desde BDI."),
+            "% Sin Responder": st.column_config.NumberColumn(help="Conversaciones que nunca recibieron un primer mensaje nuestro."),
+            "% Inicia Cliente": st.column_config.NumberColumn(help="Conversaciones abiertas por el cliente y no por el asesor.")
+        },
+        hide_index=True, **ANCHO
+    )
+
+    divider()
+
+    section_header("EVOLUCIÓN", "Volumen Diario por Conexión",
+                   subtitle="Sirve para ver desde qué día quedó operativa cada línea.")
+    df_dia_con = df.groupby(['fecha_corta', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
+    fig_dc = px.line(
+        df_dia_con, x='fecha_corta', y='Chats', color='conexion',
+        color_discrete_map=CONEXION_COLORS, markers=True,
+        title="Conversaciones por Día y Conexión"
+    )
+    fig_dc.update_traces(line=dict(width=2), marker=dict(size=5))
+    fig_dc = apply_bdi_theme(fig_dc, legend_below=True)
+    fig_dc.update_layout(xaxis_title="Fecha", yaxis_title="Conversaciones", legend_title="Conexión", height=380)
+    st.plotly_chart(fig_dc, **ANCHO)
+
+    col_cc1, col_cc2 = st.columns(2)
+    with col_cc1:
+        fig_nuevos = px.bar(
+            res_con, x='Conexión', y='% Nuevos', text='% Nuevos',
+            color='Conexión', color_discrete_map=CONEXION_COLORS,
+            title="Captación: % de Contactos Nuevos"
+        )
+        fig_nuevos.update_traces(texttemplate='%{text:.1f}%', textposition='outside', cliponaxis=False)
+        fig_nuevos = apply_bdi_theme(fig_nuevos)
+        fig_nuevos.update_layout(showlegend=False, xaxis_title="", yaxis_title="% de conversaciones")
+        st.plotly_chart(fig_nuevos, **ANCHO)
+    with col_cc2:
+        fig_frtc = px.bar(
+            res_con, x='Conexión', y='FRT Mediano', text='FRT Mediano',
+            color='Conexión', color_discrete_map=CONEXION_COLORS,
+            title="Agilidad: FRT Mediano por Conexión (min)"
+        )
+        fig_frtc.update_traces(texttemplate='%{text:.0f} min', textposition='outside', cliponaxis=False)
+        fig_frtc = apply_bdi_theme(fig_frtc)
+        fig_frtc.update_layout(showlegend=False, xaxis_title="", yaxis_title="Minutos (mediana)")
+        st.plotly_chart(fig_frtc, **ANCHO)
+
+    divider()
+
+    section_header("QUIÉN ATIENDE QUÉ", "Reparto de Asesores entre Líneas",
+                   subtitle="Los asesores responden en las dos conexiones: acá se ve cuánto pesa cada una en su carga.")
+    df_uc = df.groupby(['user', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
+    orden_users = df_uc.groupby('user')['Chats'].sum().sort_values(ascending=True).index.tolist()
+
+    col_q1, col_q2 = st.columns(2)
+    with col_q1:
+        fig_uc = px.bar(
+            df_uc, x='Chats', y='user', color='conexion', orientation='h', text='Chats',
+            color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_users},
+            title="Conversaciones por Asesor y Conexión"
+        )
+        fig_uc.update_traces(textposition='inside', textfont=dict(color='#FFFFFF'))
+        fig_uc = apply_bdi_theme(fig_uc, legend_below=True)
+        fig_uc.update_layout(barmode='stack', xaxis_title="Conversaciones", yaxis_title="",
+                             legend_title="Conexión", height=420)
+        st.plotly_chart(fig_uc, **ANCHO)
+
+    with col_q2:
+        df_frt_uc = df.groupby(['user', 'conexion'])['FRT_min'].median().reset_index()
+        fig_frt_uc = px.bar(
+            df_frt_uc, x='FRT_min', y='user', color='conexion', orientation='h', text='FRT_min',
+            barmode='group', color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_users},
+            title="FRT Mediano por Asesor y Conexión (min)"
+        )
+        fig_frt_uc.update_traces(texttemplate='%{text:.0f}', textposition='outside', cliponaxis=False)
+        fig_frt_uc = apply_bdi_theme(fig_frt_uc, legend_below=True)
+        fig_frt_uc.update_layout(xaxis_title="Minutos (mediana)", yaxis_title="",
+                                 legend_title="Conexión", height=420)
+        st.plotly_chart(fig_frt_uc, **ANCHO)
+
+    st.caption("💡 Un asesor con FRT alto en una sola de las líneas suele indicar que esa conexión "
+               "no está en su rutina de revisión, no que responda lento en general.")
+
+    divider()
+
+    section_header("PERFIL DEL CONTACTO", "Qué Tipo de Consulta Entra por Cada Línea")
+    col_p1, col_p2 = st.columns(2)
+    with col_p1:
+        df_tc = df[df['tier'] != 'Sin Etiqueta Monto'].groupby(['conexion', 'tier'])[COL_ID].nunique().reset_index(name='Chats')
+        if not df_tc.empty:
+            tot_c = df_tc.groupby('conexion')['Chats'].transform('sum')
+            df_tc['Pct'] = df_tc['Chats'] / tot_c * 100
+            fig_tc = px.bar(
+                df_tc, x='Pct', y='conexion', color='tier', orientation='h',
+                color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+                title="Mix Patrimonial dentro de Cada Conexión (%)"
+            )
+            fig_tc.update_traces(texttemplate='%{x:.0f}%', textposition='inside')
+            fig_tc = apply_bdi_theme(fig_tc, legend_below=True)
+            fig_tc.update_layout(barmode='stack', xaxis_title="% de conversaciones etiquetadas",
+                                 yaxis_title="", legend_title="Segmento (USD)", height=360)
+            st.plotly_chart(fig_tc, **ANCHO)
+        else:
+            st.info("No hay segmentos patrimoniales etiquetados en la selección.")
+
+    with col_p2:
+        df_ec = df.explode('estados').dropna(subset=['estados'])
+        if not df_ec.empty:
+            df_ec = df_ec.groupby(['conexion', 'estados'])[COL_ID].nunique().reset_index(name='Chats')
+            fig_ec = px.bar(
+                df_ec, x='Chats', y='conexion', color='estados', orientation='h', text='Chats',
+                color_discrete_map=ESTADO_COLORS,
+                title="Estado Comercial del Contacto por Conexión"
+            )
+            fig_ec.update_traces(textposition='inside', textfont=dict(color='#FFFFFF'))
+            fig_ec = apply_bdi_theme(fig_ec, legend_below=True)
+            fig_ec.update_layout(barmode='stack', xaxis_title="Conversaciones", yaxis_title="",
+                                 legend_title="Estado", height=360)
+            st.plotly_chart(fig_ec, **ANCHO)
+        else:
+            st.info("No hay etiquetas de estado comercial (Potencial Cliente, EX CLIENTE, no es cliente) "
+                    "en la selección actual.")
+
+    divider()
+
+    section_header("HORARIOS", "Cuándo Escribe Cada Línea",
+                   subtitle="Normalizado dentro de cada conexión para que una línea chica no quede aplastada.")
+    df_hc = df[(df['hora'] >= 8) & (df['hora'] <= 20)].groupby(['conexion', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
+    if not df_hc.empty:
+        tot_h = df_hc.groupby('conexion')['Chats'].transform('sum')
+        df_hc['Pct'] = df_hc['Chats'] / tot_h * 100
+        fig_hc = px.line(
+            df_hc, x='hora', y='Pct', color='conexion', markers=True,
+            color_discrete_map=CONEXION_COLORS,
+            title="Distribución Horaria Relativa por Conexión (%)"
+        )
+        fig_hc.update_traces(line=dict(width=2.5), marker=dict(size=7))
+        fig_hc = apply_bdi_theme(fig_hc, legend_below=True)
+        fig_hc.update_layout(xaxis_title="Hora del día", yaxis_title="% de las conversaciones de la línea",
+                             legend_title="Conexión", xaxis=dict(dtick=1), height=380)
+        st.plotly_chart(fig_hc, **ANCHO)
+    else:
+        st.info("No hay conversaciones en la franja de 8 a 20 hs para la selección actual.")
 
 # ---------------------------------------------------------
 # TAB 2: BROKERS Y PATRIMONIO
