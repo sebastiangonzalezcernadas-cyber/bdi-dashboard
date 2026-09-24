@@ -12,7 +12,7 @@ import io
 import inspect
 import gdown
 import holidays
-from datetime import datetime
+from datetime import datetime, time
 
 # ===========================================================
 # CONFIGURACIÓN DE PÁGINA Y TEMA CORPORATIVO (BDI CONSULTORA)
@@ -149,7 +149,7 @@ st.markdown("""
 # ---------------------------------------------------------
 USER_COLORS = {
     'Ruso': '#157347', 'Harry': '#2FA66B', 'BDI': '#3AAFB9',
-    'Gian': '#0B3D27', 'Toto': '#5BC49A', 'Mariano': '#A9C9A4', 'Sin Asignar': '#C9D2CE'
+    'Gian': '#0B3D27', 'Toto': '#5BC49A', 'Mariano': '#A9C9A4'
 }
 BROKER_COLORS = {
     'Balanz': '#0B3D66', 'BMB': '#3E92CC', 'IOL': '#D6336C', 'Inviu': '#2FA66B', 'Sin Broker': '#AEB6B2'
@@ -217,6 +217,21 @@ ARCHIVOS_DRIVE_DIRECTOS = {
 }
 
 EXCLUIR_CONTACTOS = ['Soporte IOL', 'Caroline Pascuzzi - Soporte IOL', 'Caroline Pascuzzi - Soporte Inviu']
+
+# ===========================================================
+# JORNADA LABORAL BDI — 9:30 a 17:30, lunes a viernes, sin feriados AR.
+# Todo tiempo de respuesta y de resolución se mide SOLO dentro de esta ventana.
+# Para cambiar el horario, se tocan únicamente estas cuatro constantes.
+# ===========================================================
+HORARIO_INICIO = time(9, 30)
+HORARIO_FIN = time(17, 30)
+MINUTOS_JORNADA = ((HORARIO_FIN.hour * 60 + HORARIO_FIN.minute) -
+                   (HORARIO_INICIO.hour * 60 + HORARIO_INICIO.minute))
+HORAS_JORNADA = MINUTOS_JORNADA / 60.0
+HORA_GRAF_INI = HORARIO_INICIO.hour          # 9  → primera franja del heatmap
+HORA_GRAF_FIN = HORARIO_FIN.hour             # 17 → última franja del heatmap
+HORARIO_TXT = f"{HORARIO_INICIO.strftime('%H:%M')} a {HORARIO_FIN.strftime('%H:%M')}"
+ORIGEN_BUSDAY = np.datetime64('2020-01-01', 'D')
 
 DATA_DIR = "./data_drive"
 MANIFEST_PATH = os.path.join(DATA_DIR, "_manifest.json")
@@ -358,6 +373,58 @@ def es_xlsx_valido(path):
             return f.read(2) == b'PK'
     except OSError:
         return False
+
+
+# -----------------------------------------------------------
+# TIEMPOS EN HORARIO LABORAL
+# -----------------------------------------------------------
+def feriados_np(anios):
+    try:
+        fer = holidays.AR(years=sorted({int(a) for a in anios if a and a > 2000}))
+        return np.array(sorted(fer.keys()), dtype='datetime64[D]')
+    except Exception:
+        return np.array([], dtype='datetime64[D]')
+
+def _minutos_acumulados(ts, feriados):
+    """Minutos de jornada transcurridos desde ORIGEN_BUSDAY hasta cada timestamp.
+
+    Un chat que entra a las 20:00 cuenta como si hubiese llegado al cierre: el reloj
+    laboral arranca recién a las 9:30 del siguiente día hábil.
+    """
+    fechas = ts.dt.normalize().values.astype('datetime64[D]')
+    dias_previos = np.busday_count(ORIGEN_BUSDAY, fechas, holidays=feriados).astype(float)
+    habil = np.is_busday(fechas, holidays=feriados)
+    minuto_del_dia = (ts.dt.hour * 60 + ts.dt.minute + ts.dt.second / 60.0).values
+    desde_apertura = minuto_del_dia - (HORARIO_INICIO.hour * 60 + HORARIO_INICIO.minute)
+    dentro = np.clip(desde_apertura, 0, MINUTOS_JORNADA)
+    dentro = np.where(habil, dentro, 0.0)
+    return dias_previos * MINUTOS_JORNADA + dentro
+
+def minutos_laborales(inicio, fin, feriados):
+    """Minutos de jornada entre dos timestamps. NaN si falta alguno."""
+    out = pd.Series(np.nan, index=inicio.index, dtype='float64')
+    mask = inicio.notna() & fin.notna()
+    if not mask.any():
+        return out
+    a = _minutos_acumulados(inicio[mask], feriados)
+    b = _minutos_acumulados(fin[mask], feriados)
+    out.loc[mask] = np.clip(b - a, 0, None)
+    return out
+
+def en_horario_laboral(ts, feriados):
+    """True si el timestamp cae dentro de la jornada de un día hábil."""
+    res = pd.Series(False, index=ts.index)
+    mask = ts.notna()
+    if not mask.any():
+        return res
+    t = ts[mask]
+    fechas = t.dt.normalize().values.astype('datetime64[D]')
+    habil = np.is_busday(fechas, holidays=feriados)
+    minuto = (t.dt.hour * 60 + t.dt.minute).values
+    apertura = HORARIO_INICIO.hour * 60 + HORARIO_INICIO.minute
+    cierre = HORARIO_FIN.hour * 60 + HORARIO_FIN.minute
+    res.loc[mask] = habil & (minuto >= apertura) & (minuto < cierre)
+    return res
 
 # -----------------------------------------------------------
 # CAPA 1 · CONEXIÓN Y LISTADO DE ARCHIVOS EN DRIVE
@@ -665,7 +732,7 @@ def analizar_captacion(df_linea, df_historia, linea):
         filas.append({
             'contactNumber': contacto,
             'contactName': g['contactName'].iloc[0],
-            'Asesor': g['user'].mode()[0] if not g['user'].mode().empty else 'Sin Asignar',
+            'Asesor': g['user'].mode()[0] if not g['user'].mode().empty else g['user'].iloc[0],
             'Primer Chat': primer_chat,
             'Conversaciones': g[COL_ID].nunique(),
             'FRT_min': frt,
@@ -675,8 +742,8 @@ def analizar_captacion(df_linea, df_historia, linea):
             'Horas a Derivación': horas,
             'hora_ingreso': primer_chat.hour if pd.notna(primer_chat) else np.nan,
             'fecha': primer_chat.date() if pd.notna(primer_chat) else None,
-            'fuera_horario': bool(pd.notna(primer_chat) and
-                                  (primer_chat.hour < 9 or primer_chat.hour >= 18 or primer_chat.weekday() >= 5)),
+            'fuera_horario': not bool(g['en_horario'].iloc[0]),
+            'FRT_real': g['FRT_real_min'].min(),
         })
     return pd.DataFrame(filas)
 
@@ -808,12 +875,26 @@ def procesar(df, dedup=True):
     df['hora_30m'] = df['createdAt_dt'].dt.floor('30min').dt.strftime('%H:%M')
 
     # --- Tiempos
-    df['FRT_min'] = (df['firstSentMessageAt_dt'] - df['createdAt_dt']).dt.total_seconds() / 60.0
-    df.loc[df['FRT_min'] < 0, 'FRT_min'] = np.nan
+    # El reloj de calendario queda como referencia (lo que espera el cliente en la vida real),
+    # pero TODAS las métricas del tablero usan la versión en jornada laboral.
+    df['FRT_real_min'] = (df['firstSentMessageAt_dt'] - df['createdAt_dt']).dt.total_seconds() / 60.0
+    df.loc[df['FRT_real_min'] < 0, 'FRT_real_min'] = np.nan
+    df['res_real_min'] = (df['resolvedAt_dt'] - df['createdAt_dt']).dt.total_seconds() / 60.0
+    df.loc[df['res_real_min'] < 0, 'res_real_min'] = np.nan
+
+    fer = feriados_np(df['createdAt_dt'].dt.year.dropna().unique())
+    df['FRT_min'] = minutos_laborales(df['createdAt_dt'], df['firstSentMessageAt_dt'], fer)
+    df['res_time_wh_min'] = minutos_laborales(df['createdAt_dt'], df['resolvedAt_dt'], fer)
+    df['en_horario'] = en_horario_laboral(df['createdAt_dt'], fer)
+
+    # Si el CRM no trae resolvedAt, se cae a su propio cálculo de horario laboral.
+    faltan_res = df['res_time_wh_min'].isna()
+    if faltan_res.any():
+        df.loc[faltan_res, 'res_time_wh_min'] = (
+            col_segura(df, 'workingHoursResolutionTime')[faltan_res].apply(time_str_to_minutes))
+
+    df['res_time_min'] = df['res_real_min']
     df['resp_time_min'] = col_segura(df, 'responseTime').apply(time_str_to_minutes)
-    df['resp_time_wh_min'] = col_segura(df, 'workingHoursResponseTime').apply(time_str_to_minutes)
-    df['res_time_min'] = col_segura(df, 'resolutionTime').apply(time_str_to_minutes)
-    df['res_time_wh_min'] = col_segura(df, 'workingHoursResolutionTime').apply(time_str_to_minutes)
 
     # --- Etiquetas
     df['brokers'] = col_segura(df, 'tags').apply(extract_brokers)
@@ -846,9 +927,19 @@ def procesar(df, dedup=True):
     # --- Identificadores y flags
     if COL_ID not in df.columns:
         df[COL_ID] = np.arange(len(df)).astype(str)
+    # Conversaciones sin asesor asignado: quedaron en el chatbot o se cerraron solas.
+    # No representan el trabajo de nadie, así que no entran en ninguna métrica.
     if 'user' not in df.columns:
-        df['user'] = 'Sin Asignar'
-    df['user'] = df['user'].fillna('Sin Asignar')
+        log.append(("error", "El export no trae la columna `user`: no se puede atribuir ninguna conversación."))
+        df['user'] = pd.NA
+    df['user'] = df['user'].astype('object').where(df['user'].notna(), pd.NA)
+    vacios = df['user'].isna() | (df['user'].astype(str).str.strip() == '')
+    if vacios.any():
+        sin_resp = int(df.loc[vacios, 'firstSentMessageAt_dt'].isna().sum())
+        log.append(("warn", f"{int(vacios.sum()):,} conversaciones sin asesor asignado quedaron fuera del "
+                            f"análisis ({sin_resp} de ellas nunca recibieron respuesta). "
+                            "Son chats que no salieron del chatbot o se cerraron sin tomarse."))
+        df = df[~vacios].reset_index(drop=True)
     if 'contactName' not in df.columns:
         df['contactName'] = 'Sin Nombre'
     df['contactName'] = df['contactName'].fillna('Sin Nombre')
@@ -1040,14 +1131,16 @@ kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 kpi1.metric("Total Chats", f"{total_conv:,}")
 kpi2.metric("Contactos Únicos", f"{contactos_unicos:,}")
 kpi3.metric("Nuevos Contactos", f"{int(df['isNewContact'].sum()):,}")
-kpi4.metric("FRT Mediano", f"{df['FRT_min'].median():.1f} min" if df['FRT_min'].notna().any() else "s/d")
+kpi4.metric("FRT Mediano", f"{df['FRT_min'].median():.1f} min" if df['FRT_min'].notna().any() else "s/d",
+            help=f"Minutos de jornada laboral ({HORARIO_TXT} hs) hasta la primera respuesta. "
+                 "Un chat que entra a las 20:00 empieza a contar a las 9:30 del día hábil siguiente.")
 kpi5.metric("Cierre Inactividad", f"{int(df['resolvedByInactivity'].sum()):,}")
 
 kpi6, kpi7, kpi8, kpi9, kpi10 = st.columns(5)
 kpi6.metric("Chats por Contacto", f"{ratio_chats_contacto:.2f}" if pd.notna(ratio_chats_contacto) else "s/d",
             help="Conversaciones totales dividido contactos únicos.")
 kpi7.metric("Resolución Mediana", f"{df['res_time_wh_min'].median():.0f} min" if df['res_time_wh_min'].notna().any() else "s/d",
-            help="Mediana del tiempo de resolución en horario laboral. Se usa mediana porque unos pocos chats de varios días distorsionan el promedio.")
+            help=f"Minutos de jornada ({HORARIO_TXT} hs) hasta el cierre. Se usa mediana porque unos pocos chats de varios días distorsionan el promedio.")
 kpi8.metric("Iniciados por Cliente", f"{df['startedByContact'].mean()*100:.0f}%" if len(df) else "s/d",
             help="Porcentaje de conversaciones que abrió el cliente y no el asesor.")
 kpi9.metric("Sin Responder", f"{int(df['FRT_min'].isna().sum()):,}",
@@ -1194,13 +1287,13 @@ with tab1:
                            xaxis=dict(dtick=1), legend_title="Conexión")
     st.plotly_chart(fig_hora, **ANCHO)
 
-    df_h30_base = df[(df['hora'] >= 8) & (df['hora'] <= 18)]
+    df_h30_base = df[(df['hora'] >= HORA_GRAF_INI) & (df['hora'] <= HORA_GRAF_FIN)]
     if df['conexion'].nunique() > 1:
         df_hora_30 = df_h30_base.groupby(['hora_30m', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
         fig_hora_30 = px.area(
             df_hora_30, x='hora_30m', y='Chats', color='conexion', markers=True,
             color_discrete_map=CONEXION_COLORS,
-            title="Carga Horaria Comercial (08:00 a 18:00 hs · apilado por conexión)"
+            title=f"Carga Horaria en Jornada Laboral ({HORARIO_TXT} hs · apilado por conexión)"
         )
         fig_hora_30.update_traces(marker=dict(size=5))
         fig_hora_30 = apply_bdi_theme(fig_hora_30, legend_below=True)
@@ -1208,7 +1301,7 @@ with tab1:
         df_hora_30 = df_h30_base.groupby('hora_30m')[COL_ID].nunique().reset_index(name='Chats')
         fig_hora_30 = px.area(
             df_hora_30, x='hora_30m', y='Chats', markers=True,
-            color_discrete_sequence=['#157347'], title="Carga Horaria Comercial (08:00 a 18:00 hs · Intervalos de 30 min)"
+            color_discrete_sequence=['#157347'], title=f"Carga Horaria en Jornada Laboral ({HORARIO_TXT} hs · intervalos de 30 min)"
         )
         fig_hora_30.update_traces(marker=dict(size=8, color='#0F5132'),
                                   fillcolor='rgba(21,115,71,0.15)', line=dict(color='#0F5132'))
@@ -1372,7 +1465,7 @@ with tab_con:
 
     section_header("HORARIOS", "Cuándo Escribe Cada Línea",
                    subtitle="Normalizado dentro de cada conexión para que una línea chica no quede aplastada.")
-    df_hc = df[(df['hora'] >= 8) & (df['hora'] <= 20)].groupby(['conexion', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
+    df_hc = df[(df['hora'] >= HORA_GRAF_INI - 1) & (df['hora'] <= HORA_GRAF_FIN + 2)].groupby(['conexion', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
     if not df_hc.empty:
         tot_h = df_hc.groupby('conexion')['Chats'].transform('sum')
         df_hc['Pct'] = df_hc['Chats'] / tot_h * 100
@@ -1387,7 +1480,7 @@ with tab_con:
                              legend_title="Conexión", xaxis=dict(dtick=1), height=380)
         st.plotly_chart(fig_hc, **ANCHO)
     else:
-        st.info("No hay conversaciones en la franja de 8 a 20 hs para la selección actual.")
+        st.info("No hay conversaciones en la franja horaria analizada.")
 
 
 # ---------------------------------------------------------
@@ -1470,7 +1563,8 @@ with tab_cap:
             divider()
 
             section_header("VELOCIDAD", "Cuánto Tarda en Contestarse un Lead",
-                           subtitle="En captación lo que define el resultado es la cola, no el promedio.")
+                           subtitle=f"Minutos de jornada laboral ({HORARIO_TXT} hs). En captación lo que "
+                                    "define el resultado es la cola, no el promedio.")
             col_v1, col_v2 = st.columns([3, 2])
             with col_v1:
                 tramos = (nuevos['Tramo'].value_counts()
@@ -1494,12 +1588,18 @@ with tab_cap:
                 fuera = nuevos[nuevos['fuera_horario']]['FRT_min'].median()
                 n_fuera = int(nuevos['fuera_horario'].sum())
                 st.markdown("##### Dentro vs. fuera de horario")
+                real_med = nuevos['FRT_real'].median()
+                st.metric("Espera real del lead (reloj de pared)",
+                          f"{real_med/60:.1f} hs" if pd.notna(real_med) else "s/d",
+                          help="Tiempo calendario que el lead percibe, sin descontar noches ni fines de "
+                               "semana. Las demás métricas usan minutos de jornada laboral.")
                 st.metric("Leads fuera de horario", f"{n_fuera:,}",
-                          help="Entraron antes de las 9, después de las 18, o un fin de semana.")
+                          help=f"Entraron fuera de la jornada de {HORARIO_TXT} hs, o un fin de semana o feriado.")
                 st.metric("FRT mediano dentro de horario", f"{dentro:.0f} min" if pd.notna(dentro) else "s/d")
                 st.metric("FRT mediano fuera de horario", f"{fuera:.0f} min" if pd.notna(fuera) else "s/d")
                 if pd.notna(dentro) and pd.notna(fuera) and fuera > dentro * 3:
-                    st.warning(f"Un lead que entra fuera de horario espera **{fuera/dentro:.0f} veces más**. "
+                    st.warning(f"Aun midiendo solo minutos de jornada, un lead que entra fuera de horario "
+                               f"espera **{fuera/dentro:.0f} veces más**. "
                                "Un autorespondedor que fije expectativa y pida datos cuesta poco y tapa ese agujero.",
                                icon="⚠️")
 
@@ -1661,7 +1761,7 @@ with tab_pri:
             dias_p = dias_habiles_efectivos(df_pri['createdAt_dt'])
 
             section_header("PANORAMA", f"Atención de Cartera · {linea_pri}",
-                           subtitle=f"{dias_p} días hábiles en la selección. Todo lo de esta solapa "
+                           subtitle=f"{dias_p} días hábiles · jornada {HORARIO_TXT} hs. Todo lo de esta solapa "
                                     "corresponde únicamente a esta conexión.")
 
             p = st.columns(6)
@@ -1734,8 +1834,9 @@ with tab_pri:
             divider()
 
             section_header("VELOCIDAD", "Semáforo de Primera Respuesta",
-                           subtitle="Medido por conversación: en una línea de cartera el mismo cliente "
-                                    "escribe muchas veces y cada consulta merece respuesta.")
+                           subtitle=f"Minutos de jornada laboral ({HORARIO_TXT} hs), por conversación: en una "
+                                    "línea de cartera el mismo cliente escribe muchas veces y cada consulta "
+                                    "merece respuesta.")
             tr_p = df_pri['FRT_min'].apply(clasificar_tramo).value_counts().reindex(ORDEN_TRAMOS).fillna(0).reset_index()
             tr_p.columns = ['Tramo', 'Chats']
             tr_p['Pct'] = tr_p['Chats'] / conv_p * 100
@@ -1755,11 +1856,11 @@ with tab_pri:
             divider()
 
             section_header("SATURACIÓN", f"Carga por Día y Hora · {linea_pri}")
-            df_hp = df_pri[(df_pri['hora'] >= 8) & (df_pri['hora'] <= 18) &
+            df_hp = df_pri[(df_pri['hora'] >= HORA_GRAF_INI) & (df_pri['hora'] <= HORA_GRAF_FIN) &
                            (~df_pri['dia_semana'].isin(['Sábado', 'Domingo']))]
             if not df_hp.empty:
                 hc = df_hp.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
-                horas_p = list(range(8, 19))
+                horas_p = list(range(HORA_GRAF_INI, HORA_GRAF_FIN + 1))
                 hdp = hc.pivot(index='dia_semana', columns='hora', values='Chats').reindex(
                     index=DAY_ORDER_LABORAL, columns=horas_p).fillna(0)
                 zp = hdp.values
@@ -1793,7 +1894,7 @@ with tab_pri:
                                      margin=dict(t=90, b=30, l=110, r=40))
                 st.plotly_chart(fig_hp, **ANCHO)
             else:
-                st.info("No hay conversaciones en horario comercial para esta línea.")
+                st.info("No hay conversaciones en jornada laboral para esta línea.")
 
             divider()
 
@@ -2033,8 +2134,9 @@ with tab4:
     total_general_chats = df[COL_ID].nunique()
     base_dias = dias_habiles_efectivos(df['createdAt_dt'])
 
-    st.caption(f"📅 **Base de cálculo temporal:** {base_dias} días hábiles reales de los períodos seleccionados "
-               "(excluye fines de semana y feriados de Argentina, y respeta meses incompletos) · Jornada de 8 hs.")
+    st.caption(f"📅 **Base de cálculo:** {base_dias} días hábiles reales de los períodos seleccionados "
+               f"(sin fines de semana ni feriados AR, respetando meses incompletos) · Jornada {HORARIO_TXT} hs "
+               f"({HORAS_JORNADA:.0f} hs). Todos los tiempos de respuesta y resolución se miden solo dentro de esa ventana.")
 
     df_user_eff = df.groupby('user').agg(
         Total_Chats=(COL_ID, 'nunique'),
@@ -2045,7 +2147,7 @@ with tab4:
     df_user_eff['Participación (%)'] = (df_user_eff['Total_Chats'] / total_general_chats * 100) if total_general_chats > 0 else 0
     df_user_eff['Contactos Nuevos (%)'] = (df_user_eff['Contactos_Nuevos'] / df_user_eff['Total_Chats'] * 100)
     df_user_eff['Chats / Día'] = df_user_eff['Total_Chats'] / base_dias
-    df_user_eff['Chats / Hora (8hs)'] = df_user_eff['Chats / Día'] / 8.0
+    df_user_eff['Chats / Hora (8hs)'] = df_user_eff['Chats / Día'] / HORAS_JORNADA
 
     df_user_eff = df_user_eff.sort_values('Total_Chats', ascending=False)
 
@@ -2154,16 +2256,18 @@ with tab4:
     divider()
 
     section_header("SATURACIÓN", "Picos de Actividad por Día y Hora")
-    st.caption("Excluye fines de semana · Horario comercial (8 a 18 hs) · La intensidad del verde indica el volumen absoluto; el porcentaje, el peso de esa franja dentro del día.")
+    st.caption(f"Excluye fines de semana · Jornada laboral ({HORARIO_TXT} hs) · La intensidad del verde indica "
+               "el volumen absoluto; el porcentaje, el peso de esa franja dentro del día.")
 
-    df_heatmap = df[(df['hora'] >= 8) & (df['hora'] <= 18) & (~df['dia_semana'].isin(['Sábado', 'Domingo']))]
+    df_heatmap = df[(df['hora'] >= HORA_GRAF_INI) & (df['hora'] <= HORA_GRAF_FIN) &
+                    (~df['dia_semana'].isin(['Sábado', 'Domingo']))]
 
     if not df_heatmap.empty:
         heatmap_counts = df_heatmap.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
         totals_per_day = heatmap_counts.groupby('dia_semana')['Chats'].transform('sum')
         heatmap_counts['Porcentaje'] = (heatmap_counts['Chats'] / totals_per_day * 100).round(1)
 
-        horas = list(range(8, 19))
+        horas = list(range(HORA_GRAF_INI, HORA_GRAF_FIN + 1))
         heatmap_data = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Chats')
                         .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
         heatmap_pct = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Porcentaje')
@@ -2225,7 +2329,7 @@ with tab4:
         st.caption(f"🔥 **Pico de demanda:** {pico['dia_semana']} a las {int(pico['hora']):02d}:00 hs "
                    f"con {int(pico['Chats'])} conversaciones ({pico['Porcentaje']:.0f}% del día).")
     else:
-        st.info("No hay chats registrados en horario comercial para la selección actual.")
+        st.info("No hay chats registrados en jornada laboral para la selección actual.")
 
 # ---------------------------------------------------------
 # TAB 5: FRICCIÓN Y COMPLEJIDAD
