@@ -247,22 +247,33 @@ COLS_DEDUP_FALLBACK = ['chatId', 'contactNumber', 'createdAt', 'firstSentMessage
 # FUNCIONES AUXILIARES DE PRESENTACIÓN
 # -----------------------------------------------------------
 def apply_bdi_theme(fig, legend_below=False):
+    """Tema visual BDI.
+
+    OJO con el orden: esta función se llama DESPUÉS de armar cada gráfico, así que
+    no debe tocar `textposition` — antes lo forzaba a 'auto' y pisaba el 'outside'
+    de cada trace, lo que metía las etiquetas adentro de la barra y las achicaba
+    hasta volverlas ilegibles. `uniformtext` con mode='show' impide ese encogido.
+    """
     fig.update_layout(
-        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=13),
-        title=dict(font=dict(color='#0F5132', size=17), x=0.01, xanchor='left'),
-        xaxis=dict(title_font=dict(color='#3F4F49', size=13), tickfont=dict(color='#4A5D57'), gridcolor='#EAF0ED'),
-        yaxis=dict(title_font=dict(color='#3F4F49', size=13), tickfont=dict(color='#4A5D57'), gridcolor='#EAF0ED'),
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=15),
+        title=dict(font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
+        xaxis=dict(title_font=dict(color='#3F4F49', size=15), tickfont=dict(color='#4A5D57', size=14),
+                   gridcolor='#EAF0ED'),
+        yaxis=dict(title_font=dict(color='#3F4F49', size=15), tickfont=dict(color='#4A5D57', size=14),
+                   gridcolor='#EAF0ED'),
         legend=dict(
-            title_font=dict(color='#0F5132', size=12), font=dict(color='#3F4F49', size=12),
+            title_font=dict(color='#0F5132', size=14), font=dict(color='#3F4F49', size=14),
             orientation='h' if legend_below else 'v', yanchor='top', y=-0.18 if legend_below else 1,
             xanchor='center' if legend_below else 'left', x=0.5 if legend_below else 1.02,
             bgcolor='rgba(0,0,0,0)'
         ),
+        uniformtext=dict(minsize=13, mode='show'),
         paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
-        margin=dict(t=60, b=50, l=50, r=40), bargap=0.25,
-        hoverlabel=dict(bgcolor='#0F5132', font_color='white', font_size=12)
+        margin=dict(t=70, b=55, l=60, r=50), bargap=0.28,
+        hoverlabel=dict(bgcolor='#0F5132', font_color='white', font_size=14)
     )
-    fig.update_traces(textposition='auto', textfont=dict(size=12), selector=dict(type="bar"))
+    fig.update_traces(textfont=dict(size=15), selector=dict(type="bar"))
+    fig.update_traces(textfont=dict(size=15), selector=dict(type="pie"))
     fig.update_traces(marker=dict(line=dict(color='#FFFFFF', width=2)), selector=dict(type="pie"))
     return fig
 
@@ -1167,53 +1178,52 @@ tab1, tab_con, tab_cap, tab_pri, tab2, tab3, tab4, tab5 = st.tabs([
 # ---------------------------------------------------------
 with tab1:
     section_header("VOLUMEN", "Evolución de Chats en el Tiempo")
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        if df['conexion'].nunique() > 1:
-            df_mes = df.groupby(['periodo', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-            fig_mes = px.bar(
-                df_mes.sort_values('periodo'), x='periodo', y='Chats', text='Chats', color='conexion',
-                color_discrete_map=CONEXION_COLORS, title="Evolución Mensual de Chats por Conexión",
-                category_orders={'periodo': periodos_disponibles}
-            )
-        else:
-            df_mes = df.groupby('periodo')[COL_ID].nunique().reset_index(name='Chats')
-            df_mes = df_mes.sort_values('periodo')
-            fig_mes = px.bar(
-                df_mes, x='periodo', y='Chats', text='Chats',
-                color_discrete_sequence=['#157347'], title="Evolución Mensual de Chats",
-                category_orders={'periodo': periodos_disponibles}
-            )
-        fig_mes.update_traces(textposition='outside')
-        fig_mes = apply_bdi_theme(fig_mes, legend_below=df['conexion'].nunique() > 1)
-        fig_mes.update_layout(xaxis_title="Período", yaxis_title="Cantidad de Chats",
-                              xaxis=dict(tickangle=-30), legend_title="Conexión")
-        st.plotly_chart(fig_mes, **ANCHO)
+    if df['conexion'].nunique() > 1:
+        df_mes = df.groupby(['periodo', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
+        fig_mes = px.bar(
+            df_mes.sort_values('periodo'), x='periodo', y='Chats', text='Chats', color='conexion',
+            color_discrete_map=CONEXION_COLORS, title="Evolución Mensual de Chats por Conexión",
+            category_orders={'periodo': periodos_disponibles}
+        )
+    else:
+        df_mes = df.groupby('periodo')[COL_ID].nunique().reset_index(name='Chats')
+        df_mes = df_mes.sort_values('periodo')
+        fig_mes = px.bar(
+            df_mes, x='periodo', y='Chats', text='Chats',
+            color_discrete_sequence=['#157347'], title="Evolución Mensual de Chats",
+            category_orders={'periodo': periodos_disponibles}
+        )
+    fig_mes.update_traces(textposition='outside')
+    fig_mes = apply_bdi_theme(fig_mes, legend_below=df['conexion'].nunique() > 1)
+    fig_mes.update_layout(xaxis_title="Período", yaxis_title="Cantidad de Chats",
+                          xaxis=dict(tickangle=-30), legend_title="Conexión", height=440,
+                          margin=dict(t=70, b=95, l=70, r=50))
+    st.plotly_chart(fig_mes, **ANCHO)
 
-    with col_t2:
-        if df['conexion'].nunique() > 1:
-            df_dias = (df[df['dia_semana'].isin(DAY_ORDER_LABORAL)]
-                       .groupby(['dia_semana', 'conexion'])[COL_ID].nunique().reset_index(name='Chats'))
-            fig_dias = px.bar(
-                df_dias, x='dia_semana', y='Chats', text='Chats', color='conexion',
-                color_discrete_map=CONEXION_COLORS,
-                category_orders={'dia_semana': DAY_ORDER_LABORAL},
-                title="Distribución de Chats por Día (total apilado por conexión)"
-            )
-            fig_dias.update_traces(textposition='inside', textfont=dict(color='#FFFFFF'))
-            fig_dias = apply_bdi_theme(fig_dias, legend_below=True)
-            fig_dias.update_layout(barmode='stack')
-        else:
-            df_dias = df['dia_semana'].value_counts().reindex(DAY_ORDER_LABORAL).fillna(0).reset_index()
-            df_dias.columns = ['Día', 'Chats']
-            fig_dias = px.bar(
-                df_dias, x='Día', y='Chats', text='Chats',
-                color_discrete_sequence=['#2FA66B'], title="Distribución de Chats (Lunes a Viernes)"
-            )
-            fig_dias.update_traces(textposition='outside')
-            fig_dias = apply_bdi_theme(fig_dias)
-        fig_dias.update_layout(xaxis_title="Día", yaxis_title="Cantidad de Chats", legend_title="Conexión")
-        st.plotly_chart(fig_dias, **ANCHO)
+    if df['conexion'].nunique() > 1:
+        df_dias = (df[df['dia_semana'].isin(DAY_ORDER_LABORAL)]
+                   .groupby(['dia_semana', 'conexion'])[COL_ID].nunique().reset_index(name='Chats'))
+        fig_dias = px.bar(
+            df_dias, x='dia_semana', y='Chats', text='Chats', color='conexion',
+            color_discrete_map=CONEXION_COLORS,
+            category_orders={'dia_semana': DAY_ORDER_LABORAL},
+            title="Distribución de Chats por Día (total apilado por conexión)"
+        )
+        fig_dias.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14), insidetextanchor='middle')
+        fig_dias = apply_bdi_theme(fig_dias, legend_below=True)
+        fig_dias.update_layout(barmode='stack')
+    else:
+        df_dias = df['dia_semana'].value_counts().reindex(DAY_ORDER_LABORAL).fillna(0).reset_index()
+        df_dias.columns = ['Día', 'Chats']
+        fig_dias = px.bar(
+            df_dias, x='Día', y='Chats', text='Chats',
+            color_discrete_sequence=['#2FA66B'], title="Distribución de Chats (Lunes a Viernes)"
+        )
+        fig_dias.update_traces(textposition='outside')
+        fig_dias = apply_bdi_theme(fig_dias)
+    fig_dias.update_layout(xaxis_title="Día", yaxis_title="Cantidad de Chats", legend_title="Conexión",
+                           height=420)
+    st.plotly_chart(fig_dias, **ANCHO)
 
     if df['fecha_corta'].notna().any():
         varias_conexiones = df['conexion'].nunique() > 1
@@ -1248,7 +1258,7 @@ with tab1:
             color='conexion', color_discrete_map=CONEXION_COLORS,
             title="Chats Totales por Conexión"
         )
-        fig_rep.update_traces(textinfo='percent+value', textposition='inside')
+        fig_rep.update_traces(textinfo='percent+value', textposition='inside', textfont=dict(size=16))
         fig_rep = apply_bdi_theme(fig_rep, legend_below=True)
         fig_rep.update_layout(margin=dict(t=60, b=80, l=30, r=30), height=380)
         st.plotly_chart(fig_rep, **ANCHO)
@@ -1258,7 +1268,7 @@ with tab1:
             rep_u, x='conexion', y='Chats', color='user', text='Chats',
             color_discrete_map=USER_COLORS, title="Composición de Cada Conexión por Asesor"
         )
-        fig_repu.update_traces(textposition='inside', textfont=dict(color='#FFFFFF'))
+        fig_repu.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14), insidetextanchor='middle')
         fig_repu = apply_bdi_theme(fig_repu, legend_below=True)
         fig_repu.update_layout(barmode='stack', xaxis_title="", yaxis_title="Conversaciones",
                                legend_title="Asesor", height=380)
@@ -1309,6 +1319,84 @@ with tab1:
     fig_hora_30.update_layout(xaxis_title="Franja horaria", yaxis_title="Cantidad de Chats", xaxis=dict(tickangle=-45))
     st.plotly_chart(fig_hora_30, **ANCHO)
 
+
+    divider()
+
+    section_header("SATURACIÓN", "Picos de Actividad por Día y Hora")
+    st.caption(f"Excluye fines de semana · Jornada laboral ({HORARIO_TXT} hs) · La intensidad del verde indica "
+               "el volumen absoluto; el porcentaje, el peso de esa franja dentro del día.")
+
+    df_heatmap = df[(df['hora'] >= HORA_GRAF_INI) & (df['hora'] <= HORA_GRAF_FIN) &
+                    (~df['dia_semana'].isin(['Sábado', 'Domingo']))]
+
+    if not df_heatmap.empty:
+        heatmap_counts = df_heatmap.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
+        totals_per_day = heatmap_counts.groupby('dia_semana')['Chats'].transform('sum')
+        heatmap_counts['Porcentaje'] = (heatmap_counts['Chats'] / totals_per_day * 100).round(1)
+
+        horas = list(range(HORA_GRAF_INI, HORA_GRAF_FIN + 1))
+        heatmap_data = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Chats')
+                        .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
+        heatmap_pct = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Porcentaje')
+                       .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
+
+        z = heatmap_data.values
+        zmax = z.max() if z.max() > 0 else 1
+        etiquetas_x = [f"{h:02d}h" for h in horas]
+
+        fig_heatmap = go.Figure(data=go.Heatmap(
+            z=z,
+            x=etiquetas_x,
+            y=list(heatmap_data.index),
+            customdata=heatmap_pct.values,
+            colorscale=BDI_HEATSCALE,
+            xgap=4, ygap=4,
+            colorbar=dict(
+                title=dict(text="Chats", font=dict(color='#0F5132', size=12)),
+                thickness=12, len=0.75, outlinewidth=0, tickfont=dict(color='#4A5D57', size=11),
+                ticks="outside", ticklen=4, tickcolor='#DDE5E1'
+            ),
+            hovertemplate="<b>%{y} · %{x}</b><br>Conversaciones: %{z}<br>Peso del día: %{customdata:.1f}%<extra></extra>",
+            zmin=0, zmax=zmax
+        ))
+
+        annotations = []
+        for i, day in enumerate(heatmap_data.index):
+            for j, hour in enumerate(horas):
+                val = z[i][j]
+                if val == 0:
+                    continue
+                pct = heatmap_pct.values[i][j]
+                intensity = val / zmax
+                text_color = '#FFFFFF' if intensity > 0.60 else '#14382A'
+                annotations.append(dict(
+                    x=etiquetas_x[j], y=day,
+                    text=f"<b>{int(val)}</b><br><span style='font-size:9px;opacity:0.85'>{pct:.0f}%</span>",
+                    showarrow=False,
+                    font=dict(color=text_color, size=12, family='Inter, Segoe UI, sans-serif'),
+                    align="center"
+                ))
+
+        fig_heatmap.update_layout(annotations=annotations)
+        fig_heatmap = apply_bdi_theme(fig_heatmap)
+        fig_heatmap.update_xaxes(title="Hora del día", side="top", showgrid=False,
+                                 tickfont=dict(color='#0F5132', size=12), ticks="")
+        fig_heatmap.update_yaxes(title="", showgrid=False, autorange="reversed",
+                                 tickfont=dict(color='#0F5132', size=13), ticks="")
+        fig_heatmap.update_layout(
+            title=dict(text="Distribución de Carga de Trabajo (Horario Comercial)",
+                       font=dict(color='#0F5132', size=17), x=0.01),
+            height=430,
+            plot_bgcolor='#FBFDFC',
+            margin=dict(t=90, b=30, l=110, r=40)
+        )
+        st.plotly_chart(fig_heatmap, **ANCHO)
+
+        pico = heatmap_counts.loc[heatmap_counts['Chats'].idxmax()]
+        st.caption(f"🔥 **Pico de demanda:** {pico['dia_semana']} a las {int(pico['hora']):02d}:00 hs "
+                   f"con {int(pico['Chats'])} conversaciones ({pico['Porcentaje']:.0f}% del día).")
+    else:
+        st.info("No hay chats registrados en jornada laboral para la selección actual.")
 
 # ---------------------------------------------------------
 # TAB CONEXIONES: COMPARATIVA ENTRE LÍNEAS DE WHATSAPP
@@ -1392,19 +1480,6 @@ with tab_con:
 
     divider()
 
-    section_header("EVOLUCIÓN", "Volumen Diario por Conexión",
-                   subtitle="Sirve para ver desde qué día quedó operativa cada línea.")
-    df_dia_con = df.groupby(['fecha_corta', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-    fig_dc = px.line(
-        df_dia_con, x='fecha_corta', y='Chats', color='conexion',
-        color_discrete_map=CONEXION_COLORS, markers=True,
-        title="Conversaciones por Día y Conexión"
-    )
-    fig_dc.update_traces(line=dict(width=2), marker=dict(size=5))
-    fig_dc = apply_bdi_theme(fig_dc, legend_below=True)
-    fig_dc.update_layout(xaxis_title="Fecha", yaxis_title="Conversaciones", legend_title="Conexión", height=380)
-    st.plotly_chart(fig_dc, **ANCHO)
-
     col_cc1, col_cc2 = st.columns(2)
     with col_cc1:
         fig_nuevos = px.bar(
@@ -1428,59 +1503,6 @@ with tab_con:
         st.plotly_chart(fig_frtc, **ANCHO)
 
     divider()
-
-    section_header("QUIÉN ATIENDE QUÉ", "Reparto de Asesores entre Líneas",
-                   subtitle="Los asesores responden en las dos conexiones: acá se ve cuánto pesa cada una en su carga.")
-    df_uc = df.groupby(['user', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-    orden_users = df_uc.groupby('user')['Chats'].sum().sort_values(ascending=True).index.tolist()
-
-    col_q1, col_q2 = st.columns(2)
-    with col_q1:
-        fig_uc = px.bar(
-            df_uc, x='Chats', y='user', color='conexion', orientation='h', text='Chats',
-            color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_users},
-            title="Conversaciones por Asesor y Conexión"
-        )
-        fig_uc.update_traces(textposition='inside', textfont=dict(color='#FFFFFF'))
-        fig_uc = apply_bdi_theme(fig_uc, legend_below=True)
-        fig_uc.update_layout(barmode='stack', xaxis_title="Conversaciones", yaxis_title="",
-                             legend_title="Conexión", height=420)
-        st.plotly_chart(fig_uc, **ANCHO)
-
-    with col_q2:
-        df_frt_uc = df.groupby(['user', 'conexion'])['FRT_min'].median().reset_index()
-        fig_frt_uc = px.bar(
-            df_frt_uc, x='FRT_min', y='user', color='conexion', orientation='h', text='FRT_min',
-            barmode='group', color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_users},
-            title="FRT Mediano por Asesor y Conexión (min)"
-        )
-        fig_frt_uc.update_traces(texttemplate='%{text:.0f}', textposition='outside', cliponaxis=False)
-        fig_frt_uc = apply_bdi_theme(fig_frt_uc, legend_below=True)
-        fig_frt_uc.update_layout(xaxis_title="Minutos (mediana)", yaxis_title="",
-                                 legend_title="Conexión", height=420)
-        st.plotly_chart(fig_frt_uc, **ANCHO)
-
-    st.caption("💡 Un asesor con FRT alto en una sola de las líneas suele indicar que esa conexión "
-               "no está en su rutina de revisión, no que responda lento en general.")
-
-    section_header("HORARIOS", "Cuándo Escribe Cada Línea",
-                   subtitle="Normalizado dentro de cada conexión para que una línea chica no quede aplastada.")
-    df_hc = df[(df['hora'] >= HORA_GRAF_INI - 1) & (df['hora'] <= HORA_GRAF_FIN + 2)].groupby(['conexion', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
-    if not df_hc.empty:
-        tot_h = df_hc.groupby('conexion')['Chats'].transform('sum')
-        df_hc['Pct'] = df_hc['Chats'] / tot_h * 100
-        fig_hc = px.line(
-            df_hc, x='hora', y='Pct', color='conexion', markers=True,
-            color_discrete_map=CONEXION_COLORS,
-            title="Distribución Horaria Relativa por Conexión (%)"
-        )
-        fig_hc.update_traces(line=dict(width=2.5), marker=dict(size=7))
-        fig_hc = apply_bdi_theme(fig_hc, legend_below=True)
-        fig_hc.update_layout(xaxis_title="Hora del día", yaxis_title="% de las conversaciones de la línea",
-                             legend_title="Conexión", xaxis=dict(dtick=1), height=380)
-        st.plotly_chart(fig_hc, **ANCHO)
-    else:
-        st.info("No hay conversaciones en la franja horaria analizada.")
 
 
 # ---------------------------------------------------------
@@ -1529,8 +1551,8 @@ with tab_cap:
             )
             fig_emb.update_traces(textposition='outside', cliponaxis=False)
             fig_emb = apply_bdi_theme(fig_emb)
-            fig_emb.update_layout(xaxis_title="Leads", yaxis_title="", height=330,
-                                  margin=dict(t=60, b=40, l=230, r=60))
+            fig_emb.update_layout(xaxis_title="Leads", yaxis_title="", height=390,
+                                  margin=dict(t=70, b=55, l=300, r=90))
             st.plotly_chart(fig_emb, **ANCHO)
 
             k = st.columns(5)
@@ -1581,7 +1603,7 @@ with tab_cap:
                 fig_tr.update_traces(textposition='outside', cliponaxis=False)
                 fig_tr = apply_bdi_theme(fig_tr)
                 fig_tr.update_layout(showlegend=False, xaxis_title="Leads", yaxis_title="",
-                                     height=340, margin=dict(t=60, b=40, l=150, r=70))
+                                     height=400, margin=dict(t=70, b=55, l=185, r=110))
                 st.plotly_chart(fig_tr, **ANCHO)
             with col_v2:
                 dentro = nuevos[~nuevos['fuera_horario']]['FRT_min'].median()
@@ -1641,29 +1663,28 @@ with tab_cap:
                 st.warning(f"**{top['Asesor']}** concentra el **{top['% de la Línea']:.0f}%** de los leads de esta línea. "
                            "Si está en una reunión o de licencia, la captación se frena entera.", icon="⚠️")
 
-            col_a1, col_a2 = st.columns(2)
-            with col_a1:
-                fig_pa = px.bar(
-                    por_asesor.sort_values('Leads'), x='Leads', y='Asesor', orientation='h', text='Leads',
-                    color='Asesor', color_discrete_map=USER_COLORS, title="Leads Atendidos por Asesor"
-                )
-                fig_pa.update_traces(textposition='outside', cliponaxis=False)
-                fig_pa = apply_bdi_theme(fig_pa)
-                fig_pa.update_layout(showlegend=False, xaxis_title="Leads únicos", yaxis_title="", height=320)
-                st.plotly_chart(fig_pa, **ANCHO)
-            with col_a2:
-                comp = por_asesor.melt(id_vars='Asesor', value_vars=['FRT_Mediano', 'FRT_p90'],
-                                       var_name='Métrica', value_name='Minutos')
-                comp['Métrica'] = comp['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
-                fig_pp = px.bar(
-                    comp, x='Minutos', y='Asesor', color='Métrica', orientation='h', barmode='group',
-                    color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
-                    title="Tiempo de Respuesta: Mediana vs. Cola"
-                )
-                fig_pp.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False)
-                fig_pp = apply_bdi_theme(fig_pp, legend_below=True)
-                fig_pp.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="", height=320)
-                st.plotly_chart(fig_pp, **ANCHO)
+            fig_pa = px.bar(
+                por_asesor.sort_values('Leads'), x='Leads', y='Asesor', orientation='h', text='Leads',
+                color='Asesor', color_discrete_map=USER_COLORS, title="Leads Atendidos por Asesor"
+            )
+            fig_pa.update_traces(textposition='outside', cliponaxis=False)
+            fig_pa = apply_bdi_theme(fig_pa)
+            fig_pa.update_layout(showlegend=False, xaxis_title="Leads únicos", yaxis_title="", height=380,
+                                 margin=dict(t=70, b=55, l=110, r=90))
+            st.plotly_chart(fig_pa, **ANCHO)
+            comp = por_asesor.melt(id_vars='Asesor', value_vars=['FRT_Mediano', 'FRT_p90'],
+                                   var_name='Métrica', value_name='Minutos')
+            comp['Métrica'] = comp['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
+            fig_pp = px.bar(
+                comp, x='Minutos', y='Asesor', color='Métrica', orientation='h', barmode='group',
+                color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
+                title="Tiempo de Respuesta: Mediana vs. Cola"
+            )
+            fig_pp.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False)
+            fig_pp = apply_bdi_theme(fig_pp, legend_below=True)
+            fig_pp.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="", height=400,
+                                 margin=dict(t=70, b=90, l=110, r=90))
+            st.plotly_chart(fig_pp, **ANCHO)
 
             divider()
 
@@ -1806,30 +1827,29 @@ with tab_pri:
                 hide_index=True, **ANCHO
             )
 
-            col_pr1, col_pr2 = st.columns(2)
-            with col_pr1:
-                fig_pu = px.bar(
-                    mu.sort_values('Chats'), x='Chats', y='user', orientation='h', text='Chats',
-                    color='user', color_discrete_map=USER_COLORS,
-                    title=f"Volumen por Asesor · {linea_pri}"
-                )
-                fig_pu.update_traces(textposition='outside', cliponaxis=False)
-                fig_pu = apply_bdi_theme(fig_pu)
-                fig_pu.update_layout(showlegend=False, xaxis_title="Conversaciones", yaxis_title="", height=360)
-                st.plotly_chart(fig_pu, **ANCHO)
-            with col_pr2:
-                comp_p = mu.melt(id_vars='user', value_vars=['FRT_Mediano', 'FRT_p90'],
-                                 var_name='Métrica', value_name='Minutos')
-                comp_p['Métrica'] = comp_p['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
-                fig_pf = px.bar(
-                    comp_p, x='Minutos', y='user', color='Métrica', orientation='h', barmode='group',
-                    color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
-                    title=f"Respuesta: Mediana vs. Cola · {linea_pri}"
-                )
-                fig_pf.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False)
-                fig_pf = apply_bdi_theme(fig_pf, legend_below=True)
-                fig_pf.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="", height=360)
-                st.plotly_chart(fig_pf, **ANCHO)
+            fig_pu = px.bar(
+                mu.sort_values('Chats'), x='Chats', y='user', orientation='h', text='Chats',
+                color='user', color_discrete_map=USER_COLORS,
+                title=f"Volumen por Asesor · {linea_pri}"
+            )
+            fig_pu.update_traces(textposition='outside', cliponaxis=False)
+            fig_pu = apply_bdi_theme(fig_pu)
+            fig_pu.update_layout(showlegend=False, xaxis_title="Conversaciones", yaxis_title="", height=400,
+                                 margin=dict(t=70, b=55, l=110, r=90))
+            st.plotly_chart(fig_pu, **ANCHO)
+            comp_p = mu.melt(id_vars='user', value_vars=['FRT_Mediano', 'FRT_p90'],
+                             var_name='Métrica', value_name='Minutos')
+            comp_p['Métrica'] = comp_p['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
+            fig_pf = px.bar(
+                comp_p, x='Minutos', y='user', color='Métrica', orientation='h', barmode='group',
+                color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
+                title=f"Respuesta: Mediana vs. Cola · {linea_pri}"
+            )
+            fig_pf.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False)
+            fig_pf = apply_bdi_theme(fig_pf, legend_below=True)
+            fig_pf.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="", height=420,
+                                 margin=dict(t=70, b=90, l=110, r=90))
+            st.plotly_chart(fig_pf, **ANCHO)
 
             divider()
 
@@ -1850,69 +1870,10 @@ with tab_pri:
             fig_trp.update_traces(textposition='outside', cliponaxis=False)
             fig_trp = apply_bdi_theme(fig_trp)
             fig_trp.update_layout(showlegend=False, xaxis_title="Conversaciones", yaxis_title="",
-                                  height=340, margin=dict(t=60, b=40, l=150, r=80))
+                                  height=400, margin=dict(t=70, b=55, l=185, r=120))
             st.plotly_chart(fig_trp, **ANCHO)
 
             divider()
-
-            section_header("SATURACIÓN", f"Carga por Día y Hora · {linea_pri}")
-            df_hp = df_pri[(df_pri['hora'] >= HORA_GRAF_INI) & (df_pri['hora'] <= HORA_GRAF_FIN) &
-                           (~df_pri['dia_semana'].isin(['Sábado', 'Domingo']))]
-            if not df_hp.empty:
-                hc = df_hp.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
-                horas_p = list(range(HORA_GRAF_INI, HORA_GRAF_FIN + 1))
-                hdp = hc.pivot(index='dia_semana', columns='hora', values='Chats').reindex(
-                    index=DAY_ORDER_LABORAL, columns=horas_p).fillna(0)
-                zp = hdp.values
-                zmaxp = zp.max() if zp.max() > 0 else 1
-                xs_p = [f"{h:02d}h" for h in horas_p]
-                fig_hp = go.Figure(data=go.Heatmap(
-                    z=zp, x=xs_p, y=list(hdp.index), colorscale=BDI_HEATSCALE, xgap=4, ygap=4,
-                    colorbar=dict(title=dict(text="Chats", font=dict(color='#0F5132', size=12)),
-                                  thickness=12, len=0.75, outlinewidth=0,
-                                  tickfont=dict(color='#4A5D57', size=11)),
-                    hovertemplate="<b>%{y} · %{x}</b><br>Conversaciones: %{z}<extra></extra>",
-                    zmin=0, zmax=zmaxp
-                ))
-                anns = []
-                for i, day in enumerate(hdp.index):
-                    for j, h in enumerate(horas_p):
-                        v = zp[i][j]
-                        if v == 0:
-                            continue
-                        anns.append(dict(x=xs_p[j], y=day, text=f"<b>{int(v)}</b>", showarrow=False,
-                                         font=dict(color='#FFFFFF' if v/zmaxp > 0.60 else '#14382A', size=12)))
-                fig_hp.update_layout(annotations=anns)
-                fig_hp = apply_bdi_theme(fig_hp)
-                fig_hp.update_xaxes(title="Hora del día", side="top", showgrid=False,
-                                    tickfont=dict(color='#0F5132', size=12), ticks="")
-                fig_hp.update_yaxes(title="", showgrid=False, autorange="reversed",
-                                    tickfont=dict(color='#0F5132', size=13), ticks="")
-                fig_hp.update_layout(title=dict(text=f"Distribución de Carga · {linea_pri}",
-                                                font=dict(color='#0F5132', size=17), x=0.01),
-                                     height=430, plot_bgcolor='#FBFDFC',
-                                     margin=dict(t=90, b=30, l=110, r=40))
-                st.plotly_chart(fig_hp, **ANCHO)
-            else:
-                st.info("No hay conversaciones en jornada laboral para esta línea.")
-
-            divider()
-
-            section_header("CLIENTES", f"Quiénes Más Escriben a {linea_pri}")
-            top_p = df_pri.groupby(['contactName', 'contactNumber']).agg(
-                Chats=(COL_ID, 'nunique'),
-                Asesor=('user', lambda x: x.mode()[0] if not x.mode().empty else '')
-            ).reset_index().sort_values('Chats', ascending=False).head(12)
-            fig_tp = px.bar(
-                top_p.sort_values('Chats'), x='Chats', y='contactName', orientation='h', text='Chats',
-                color='Asesor', color_discrete_map=USER_COLORS,
-                title=f"Top 12 Clientes · {linea_pri}"
-            )
-            fig_tp.update_traces(textposition='outside', cliponaxis=False)
-            fig_tp = apply_bdi_theme(fig_tp, legend_below=True)
-            fig_tp.update_layout(height=520, xaxis_title="Conversaciones", yaxis_title="",
-                                 margin=dict(t=60, b=90, l=180, r=60))
-            st.plotly_chart(fig_tp, **ANCHO)
 
 # ---------------------------------------------------------
 # TAB 2: BROKERS Y PATRIMONIO
@@ -1931,7 +1892,7 @@ with tab2:
             color='Broker', color_discrete_map=BROKER_COLORS,
             title="Participación Global por Broker"
         )
-        fig_broker.update_traces(textinfo='percent', textposition='inside')
+        fig_broker.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
         fig_broker = apply_bdi_theme(fig_broker, legend_below=True)
         fig_broker.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_broker, **ANCHO)
@@ -1945,7 +1906,7 @@ with tab2:
             title="Distribución Global por Segmento Patrimonial",
             category_orders={'Segmento': TIERS + ['Sin Etiqueta Monto']}
         )
-        fig_tier.update_traces(textinfo='percent', textposition='inside')
+        fig_tier.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
         fig_tier = apply_bdi_theme(fig_tier, legend_below=True)
         fig_tier.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_tier, **ANCHO)
@@ -1962,7 +1923,7 @@ with tab2:
             color='Broker', color_discrete_map=BROKER_COLORS,
             title="Participación de Brokers Activos"
         )
-        fig_broker_filt.update_traces(textinfo='percent', textposition='inside')
+        fig_broker_filt.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
         fig_broker_filt = apply_bdi_theme(fig_broker_filt, legend_below=True)
         fig_broker_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_broker_filt, **ANCHO)
@@ -1976,7 +1937,7 @@ with tab2:
             title="Segmentación Patrimonial Activa",
             category_orders={'Segmento': TIERS}
         )
-        fig_tier_filt.update_traces(textinfo='percent', textposition='inside')
+        fig_tier_filt.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
         fig_tier_filt = apply_bdi_theme(fig_tier_filt, legend_below=True)
         fig_tier_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_tier_filt, **ANCHO)
@@ -1994,7 +1955,7 @@ with tab2:
             color='Broker', color_discrete_map=BROKER_COLORS,
             title="Personas Únicas Atendidas por Broker"
         )
-        fig_broker_usr.update_traces(textinfo='percent', textposition='inside')
+        fig_broker_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
         fig_broker_usr = apply_bdi_theme(fig_broker_usr, legend_below=True)
         fig_broker_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_broker_usr, **ANCHO)
@@ -2009,7 +1970,7 @@ with tab2:
             title="Personas Únicas Atendidas por Patrimonio",
             category_orders={'Segmento': TIERS}
         )
-        fig_tier_usr.update_traces(textinfo='percent', textposition='inside')
+        fig_tier_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
         fig_tier_usr = apply_bdi_theme(fig_tier_usr, legend_below=True)
         fig_tier_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         st.plotly_chart(fig_tier_usr, **ANCHO)
@@ -2065,7 +2026,7 @@ with tab2:
     fig_tier_broker = apply_bdi_theme(fig_tier_broker, legend_below=True)
     fig_tier_broker.update_layout(
         xaxis_title="Cantidad de Chats", yaxis_title="Broker", legend_title="Segmento (USD)",
-        height=780, margin=dict(t=60, b=90, l=60, r=60)
+        height=820, margin=dict(t=70, b=95, l=110, r=110)
     )
     st.plotly_chart(fig_tier_broker, **ANCHO)
 
@@ -2089,7 +2050,8 @@ with tab3:
     )
     fig_top10.update_traces(textposition='outside', cliponaxis=False)
     fig_top10 = apply_bdi_theme(fig_top10, legend_below=True)
-    fig_top10.update_layout(height=600, margin=dict(t=60, b=90, l=140, r=60))
+    fig_top10.update_layout(height=640, xaxis_title="Conversaciones", yaxis_title="",
+                            margin=dict(t=70, b=95, l=230, r=90))
     st.plotly_chart(fig_top10, **ANCHO)
 
     divider()
@@ -2199,32 +2161,30 @@ with tab4:
     divider()
 
     section_header("PARTICIPACIÓN", "Distribución de la Carga Operativa por Conexión")
-    col_u1, col_u2 = st.columns(2)
-    with col_u1:
-        df_uc4 = df.groupby(['user', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-        orden_u4 = df_uc4.groupby('user')['Chats'].sum().sort_values(ascending=True).index.tolist()
-        fig_pie = px.bar(
-            df_uc4, x='Chats', y='user', color='conexion', orientation='h', text='Chats',
-            color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_u4},
-            title="Conversaciones por Asesor, Divididas por Conexión"
-        )
-        fig_pie.update_traces(textposition='inside', textfont=dict(color='#FFFFFF'))
-        fig_pie = apply_bdi_theme(fig_pie, legend_below=True)
-        fig_pie.update_layout(barmode='stack', xaxis_title="Conversaciones", yaxis_title="",
-                              legend_title="Conexión", height=400)
-        st.plotly_chart(fig_pie, **ANCHO)
+    df_uc4 = df.groupby(['user', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
+    orden_u4 = df_uc4.groupby('user')['Chats'].sum().sort_values(ascending=True).index.tolist()
+    fig_pie = px.bar(
+        df_uc4, x='Chats', y='user', color='conexion', orientation='h', text='Chats',
+        color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_u4},
+        title="Conversaciones por Asesor, Divididas por Conexión"
+    )
+    fig_pie.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14), insidetextanchor='middle')
+    fig_pie = apply_bdi_theme(fig_pie, legend_below=True)
+    fig_pie.update_layout(barmode='stack', xaxis_title="Conversaciones", yaxis_title="",
+                          legend_title="Conexión", height=440, margin=dict(t=70, b=90, l=110, r=60))
+    st.plotly_chart(fig_pie, **ANCHO)
 
-    with col_u2:
-        df_frt4 = df.groupby(['user', 'conexion'])['FRT_min'].median().reset_index()
-        fig_frt = px.bar(
-            df_frt4, x='FRT_min', y='user', color='conexion', orientation='h', text='FRT_min',
-            barmode='group', color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_u4},
-            title="FRT Mediano por Asesor y Conexión (min)"
-        )
-        fig_frt.update_traces(texttemplate='%{text:.0f}', textposition='outside', cliponaxis=False)
-        fig_frt = apply_bdi_theme(fig_frt, legend_below=True)
-        fig_frt.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="Conexión", height=400)
-        st.plotly_chart(fig_frt, **ANCHO)
+    df_frt4 = df.groupby(['user', 'conexion'])['FRT_min'].median().reset_index()
+    fig_frt = px.bar(
+        df_frt4, x='FRT_min', y='user', color='conexion', orientation='h', text='FRT_min',
+        barmode='group', color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_u4},
+        title="FRT Mediano por Asesor y Conexión (min)"
+    )
+    fig_frt.update_traces(texttemplate='%{text:.0f}', textposition='outside', cliponaxis=False)
+    fig_frt = apply_bdi_theme(fig_frt, legend_below=True)
+    fig_frt.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="Conexión", height=440,
+                          margin=dict(t=70, b=90, l=110, r=90))
+    st.plotly_chart(fig_frt, **ANCHO)
 
     divider()
 
@@ -2241,7 +2201,7 @@ with tab4:
                 title=f"Asesor: {asesor}",
                 color='tier', color_discrete_map=TIER_COLORS, hole=0.35
             )
-            fig_p.update_traces(textinfo='percent', textposition='inside')
+            fig_p.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
             fig_p = apply_bdi_theme(fig_p)
             fig_p.update_layout(
                 showlegend=False,
@@ -2254,82 +2214,6 @@ with tab4:
         st.info("No hay datos de patrimonio etiquetados para mostrar bajo los filtros actuales.")
 
     divider()
-
-    section_header("SATURACIÓN", "Picos de Actividad por Día y Hora")
-    st.caption(f"Excluye fines de semana · Jornada laboral ({HORARIO_TXT} hs) · La intensidad del verde indica "
-               "el volumen absoluto; el porcentaje, el peso de esa franja dentro del día.")
-
-    df_heatmap = df[(df['hora'] >= HORA_GRAF_INI) & (df['hora'] <= HORA_GRAF_FIN) &
-                    (~df['dia_semana'].isin(['Sábado', 'Domingo']))]
-
-    if not df_heatmap.empty:
-        heatmap_counts = df_heatmap.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
-        totals_per_day = heatmap_counts.groupby('dia_semana')['Chats'].transform('sum')
-        heatmap_counts['Porcentaje'] = (heatmap_counts['Chats'] / totals_per_day * 100).round(1)
-
-        horas = list(range(HORA_GRAF_INI, HORA_GRAF_FIN + 1))
-        heatmap_data = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Chats')
-                        .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
-        heatmap_pct = (heatmap_counts.pivot(index='dia_semana', columns='hora', values='Porcentaje')
-                       .reindex(index=DAY_ORDER_LABORAL, columns=horas).fillna(0))
-
-        z = heatmap_data.values
-        zmax = z.max() if z.max() > 0 else 1
-        etiquetas_x = [f"{h:02d}h" for h in horas]
-
-        fig_heatmap = go.Figure(data=go.Heatmap(
-            z=z,
-            x=etiquetas_x,
-            y=list(heatmap_data.index),
-            customdata=heatmap_pct.values,
-            colorscale=BDI_HEATSCALE,
-            xgap=4, ygap=4,
-            colorbar=dict(
-                title=dict(text="Chats", font=dict(color='#0F5132', size=12)),
-                thickness=12, len=0.75, outlinewidth=0, tickfont=dict(color='#4A5D57', size=11),
-                ticks="outside", ticklen=4, tickcolor='#DDE5E1'
-            ),
-            hovertemplate="<b>%{y} · %{x}</b><br>Conversaciones: %{z}<br>Peso del día: %{customdata:.1f}%<extra></extra>",
-            zmin=0, zmax=zmax
-        ))
-
-        annotations = []
-        for i, day in enumerate(heatmap_data.index):
-            for j, hour in enumerate(horas):
-                val = z[i][j]
-                if val == 0:
-                    continue
-                pct = heatmap_pct.values[i][j]
-                intensity = val / zmax
-                text_color = '#FFFFFF' if intensity > 0.60 else '#14382A'
-                annotations.append(dict(
-                    x=etiquetas_x[j], y=day,
-                    text=f"<b>{int(val)}</b><br><span style='font-size:9px;opacity:0.85'>{pct:.0f}%</span>",
-                    showarrow=False,
-                    font=dict(color=text_color, size=12, family='Inter, Segoe UI, sans-serif'),
-                    align="center"
-                ))
-
-        fig_heatmap.update_layout(annotations=annotations)
-        fig_heatmap = apply_bdi_theme(fig_heatmap)
-        fig_heatmap.update_xaxes(title="Hora del día", side="top", showgrid=False,
-                                 tickfont=dict(color='#0F5132', size=12), ticks="")
-        fig_heatmap.update_yaxes(title="", showgrid=False, autorange="reversed",
-                                 tickfont=dict(color='#0F5132', size=13), ticks="")
-        fig_heatmap.update_layout(
-            title=dict(text="Distribución de Carga de Trabajo (Horario Comercial)",
-                       font=dict(color='#0F5132', size=17), x=0.01),
-            height=430,
-            plot_bgcolor='#FBFDFC',
-            margin=dict(t=90, b=30, l=110, r=40)
-        )
-        st.plotly_chart(fig_heatmap, **ANCHO)
-
-        pico = heatmap_counts.loc[heatmap_counts['Chats'].idxmax()]
-        st.caption(f"🔥 **Pico de demanda:** {pico['dia_semana']} a las {int(pico['hora']):02d}:00 hs "
-                   f"con {int(pico['Chats'])} conversaciones ({pico['Porcentaje']:.0f}% del día).")
-    else:
-        st.info("No hay chats registrados en jornada laboral para la selección actual.")
 
 # ---------------------------------------------------------
 # TAB 5: FRICCIÓN Y COMPLEJIDAD
@@ -2365,40 +2249,39 @@ with tab5:
         subtitle="Cuántas veces nos vuelve a escribir un mismo cliente único. Un ratio menor indica mayor autonomía."
     )
 
-    col_f1, col_f2 = st.columns(2)
-    with col_f1:
-        df_fric_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers').agg(
-            Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
-        ).reset_index()
-        df_fric_broker['Ratio'] = df_fric_broker['Chats'] / df_fric_broker['Usuarios']
+    df_fric_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers').agg(
+        Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
+    ).reset_index()
+    df_fric_broker['Ratio'] = df_fric_broker['Chats'] / df_fric_broker['Usuarios']
 
-        fig_fric_b = px.bar(
-            df_fric_broker.sort_values('Ratio', ascending=True), x='Ratio', y='brokers', orientation='h', text='Ratio',
-            color='brokers', color_discrete_map=BROKER_COLORS,
-            title="Ratio de Chats por Usuario (por Broker)"
-        )
-        fig_fric_b.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
-        fig_fric_b = add_reference_line(fig_fric_b, df_fric_broker['Ratio'].mean(), orientation='v')
-        fig_fric_b = apply_bdi_theme(fig_fric_b)
-        fig_fric_b.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Broker", showlegend=False)
-        st.plotly_chart(fig_fric_b, **ANCHO)
+    fig_fric_b = px.bar(
+        df_fric_broker.sort_values('Ratio', ascending=True), x='Ratio', y='brokers', orientation='h', text='Ratio',
+        color='brokers', color_discrete_map=BROKER_COLORS,
+        title="Ratio de Chats por Usuario (por Broker)"
+    )
+    fig_fric_b.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
+    fig_fric_b = add_reference_line(fig_fric_b, df_fric_broker['Ratio'].mean(), orientation='v')
+    fig_fric_b = apply_bdi_theme(fig_fric_b)
+    fig_fric_b.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Broker",
+                             showlegend=False, height=420, margin=dict(t=70, b=55, l=110, r=120))
+    st.plotly_chart(fig_fric_b, **ANCHO)
 
-    with col_f2:
-        df_fric_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier').agg(
-            Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
-        ).reset_index()
-        df_fric_tier['Ratio'] = df_fric_tier['Chats'] / df_fric_tier['Usuarios']
+    df_fric_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier').agg(
+        Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
+    ).reset_index()
+    df_fric_tier['Ratio'] = df_fric_tier['Chats'] / df_fric_tier['Usuarios']
 
-        fig_fric_t = px.bar(
-            df_fric_tier, x='Ratio', y='tier', orientation='h', text='Ratio',
-            color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
-            title="Ratio de Chats por Usuario (por Patrimonio)"
-        )
-        fig_fric_t.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
-        fig_fric_t = add_reference_line(fig_fric_t, df_fric_tier['Ratio'].mean(), orientation='v')
-        fig_fric_t = apply_bdi_theme(fig_fric_t)
-        fig_fric_t.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Segmento Patrimonial", showlegend=False)
-        st.plotly_chart(fig_fric_t, **ANCHO)
+    fig_fric_t = px.bar(
+        df_fric_tier, x='Ratio', y='tier', orientation='h', text='Ratio',
+        color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+        title="Ratio de Chats por Usuario (por Patrimonio)"
+    )
+    fig_fric_t.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
+    fig_fric_t = add_reference_line(fig_fric_t, df_fric_tier['Ratio'].mean(), orientation='v')
+    fig_fric_t = apply_bdi_theme(fig_fric_t)
+    fig_fric_t.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Segmento Patrimonial",
+                             showlegend=False, height=460, margin=dict(t=70, b=55, l=170, r=120))
+    st.plotly_chart(fig_fric_t, **ANCHO)
 
     divider()
 
@@ -2407,35 +2290,34 @@ with tab5:
         subtitle="Cruza tiempos de resolución y de primera respuesta con plataformas y patrimonio."
     )
 
-    col_c1, col_c2 = st.columns(2)
-    with col_c1:
-        df_comp_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers')['res_time_wh_min'].median().reset_index()
+    df_comp_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers')['res_time_wh_min'].median().reset_index()
 
-        fig_comp_b = px.bar(
-            df_comp_broker.sort_values('res_time_wh_min', ascending=True),
-            x='res_time_wh_min', y='brokers', orientation='h', text='res_time_wh_min',
-            color='brokers', color_discrete_map=BROKER_COLORS,
-            title="Tiempo Mediano de Resolución por Broker"
-        )
-        fig_comp_b.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
-        fig_comp_b = add_reference_line(fig_comp_b, df_comp_broker['res_time_wh_min'].mean(), orientation='v')
-        fig_comp_b = apply_bdi_theme(fig_comp_b)
-        fig_comp_b.update_layout(xaxis_title="Minutos (Mediana) en Horario Laboral", yaxis_title="Broker", showlegend=False)
-        st.plotly_chart(fig_comp_b, **ANCHO)
+    fig_comp_b = px.bar(
+        df_comp_broker.sort_values('res_time_wh_min', ascending=True),
+        x='res_time_wh_min', y='brokers', orientation='h', text='res_time_wh_min',
+        color='brokers', color_discrete_map=BROKER_COLORS,
+        title="Tiempo Mediano de Resolución por Broker"
+    )
+    fig_comp_b.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
+    fig_comp_b = add_reference_line(fig_comp_b, df_comp_broker['res_time_wh_min'].mean(), orientation='v')
+    fig_comp_b = apply_bdi_theme(fig_comp_b)
+    fig_comp_b.update_layout(xaxis_title="Minutos (Mediana) en Horario Laboral", yaxis_title="Broker",
+                             showlegend=False, height=420, margin=dict(t=70, b=55, l=110, r=120))
+    st.plotly_chart(fig_comp_b, **ANCHO)
 
-    with col_c2:
-        df_comp_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median().reset_index()
+    df_comp_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median().reset_index()
 
-        fig_comp_t = px.bar(
-            df_comp_tier, x='FRT_min', y='tier', orientation='h', text='FRT_min',
-            color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
-            title="SLA de Facto: FRT Mediano por Patrimonio"
-        )
-        fig_comp_t.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
-        fig_comp_t = add_reference_line(fig_comp_t, df_comp_tier['FRT_min'].mean(), orientation='v')
-        fig_comp_t = apply_bdi_theme(fig_comp_t)
-        fig_comp_t.update_layout(xaxis_title="Minutos (Mediana)", yaxis_title="Segmento Patrimonial", showlegend=False)
-        st.plotly_chart(fig_comp_t, **ANCHO)
+    fig_comp_t = px.bar(
+        df_comp_tier, x='FRT_min', y='tier', orientation='h', text='FRT_min',
+        color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+        title="SLA de Facto: FRT Mediano por Patrimonio"
+    )
+    fig_comp_t.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
+    fig_comp_t = add_reference_line(fig_comp_t, df_comp_tier['FRT_min'].mean(), orientation='v')
+    fig_comp_t = apply_bdi_theme(fig_comp_t)
+    fig_comp_t.update_layout(xaxis_title="Minutos (Mediana)", yaxis_title="Segmento Patrimonial",
+                             showlegend=False, height=460, margin=dict(t=70, b=55, l=170, r=120))
+    st.plotly_chart(fig_comp_t, **ANCHO)
 
     st.caption("🟡 La línea punteada dorada marca el promedio del grupo. Los tiempos usan **mediana**: "
                "unas pocas conversaciones que quedan abiertas varios días vuelven engañoso el promedio simple.")
