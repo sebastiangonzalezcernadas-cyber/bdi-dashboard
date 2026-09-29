@@ -189,7 +189,28 @@ SERVICIO_COLORS = {'Membresia PLUS': '#0B3D27', 'Membresia': '#157347', 'Premium
                    'Agro': '#8FBF74', 'Consultoria': '#3AAFB9', '+1 Cuenta': '#2FA66B'}
 
 # Estado comercial del contacto (clave para leer la conexión Comercial).
-ESTADOS = ['Potencial Cliente', 'EX CLIENTE', 'no es cliente']
+ESTADOS = ['Potencial Cliente', 'EX CLIENTE', 'no es cliente', 'No califica']
+
+# Colores de reserva para asesores que aparezcan más adelante y no estén en USER_COLORS.
+PALETA_ASESORES = ['#1F8A5C', '#3E92CC', '#C9A227', '#8FBF74', '#D6336C', '#0B3D66', '#5BC49A', '#A9C9A4']
+
+# ===========================================================
+# DESENLACE DEL LEAD (solo línea comercial)
+# El orden ES la prioridad: un lead con "Membresia PLUS" y "Balanz" cuenta como
+# membresía vendida, no como "en gestión". Las dos primeras son las etiquetas de
+# cierre; "No califica" marca interés real que no llegó a los mínimos.
+# ===========================================================
+TAGS_MEMBRESIA_PLUS = 'membresia plus'
+TAGS_MEMBRESIA = 'membresia'
+TAG_NO_CALIFICA = 'no califica'
+
+DESENLACES = ['Membresía PLUS', 'Membresía BDI', 'Derivado a asesores',
+              'No califica', 'En gestión', 'Sin clasificar']
+DESENLACE_COLORS = {
+    'Membresía PLUS': '#0B3D27', 'Membresía BDI': '#157347', 'Derivado a asesores': '#3AAFB9',
+    'No califica': '#C9A227', 'En gestión': '#8FBF74', 'Sin clasificar': '#C9D2CE'
+}
+DESENLACES_CIERRE = ['Membresía PLUS', 'Membresía BDI']
 ESTADO_COLORS = {'Potencial Cliente': '#C9A227', 'EX CLIENTE': '#AEB6B2', 'no es cliente': '#D6336C'}
 
 # Conexiones (líneas de WhatsApp). Los colores se asignan por volumen en runtime,
@@ -740,6 +761,22 @@ def analizar_captacion(df_linea, df_historia, linea):
             estado = 'Sin derivar'
             horas = np.nan
 
+        # Desenlace comercial. Se juntan las etiquetas de TODAS las conversaciones del
+        # lead: la etiqueta de cierre suele cargarse en el último chat, no en el primero.
+        etiquetas = ','.join(g['tags'].dropna().astype(str)).lower()
+        if TAGS_MEMBRESIA_PLUS in etiquetas:
+            desenlace = 'Membresía PLUS'
+        elif TAGS_MEMBRESIA in etiquetas:
+            desenlace = 'Membresía BDI'
+        elif TAG_NO_CALIFICA in etiquetas:
+            desenlace = 'No califica'
+        elif estado == 'Derivado a asesores':
+            desenlace = 'Derivado a asesores'
+        elif etiquetas.strip():
+            desenlace = 'En gestión'
+        else:
+            desenlace = 'Sin clasificar'
+
         filas.append({
             'contactNumber': contacto,
             'contactName': g['contactName'].iloc[0],
@@ -750,6 +787,9 @@ def analizar_captacion(df_linea, df_historia, linea):
             'Tramo': clasificar_tramo(frt),
             'Respondido': pd.notna(frt),
             'Estado': estado,
+            'Desenlace': desenlace,
+            'Etiquetas': ', '.join(sorted({t.strip() for x in g['tags'].dropna().astype(str)
+                                           for t in x.split(',') if t.strip()})),
             'Horas a Derivación': horas,
             'hora_ingreso': primer_chat.hour if pd.notna(primer_chat) else np.nan,
             'fecha': primer_chat.date() if pd.notna(primer_chat) else None,
@@ -1072,6 +1112,12 @@ with st.sidebar.expander("🩺 Diagnóstico de carga", expanded=hay_errores):
 st.sidebar.success(f"📁 **{len(resumen_archivos)} planillas activas**")
 with st.sidebar.expander("📄 Cobertura por planilla"):
     st.dataframe(resumen_archivos, hide_index=True, **ANCHO)
+
+# Asesores que aparezcan más adelante y no estén en la paleta fija reciben color propio,
+# para que un alta nueva no quede con el color por defecto de Plotly.
+for _i, _u in enumerate(sorted(df_raw['user'].dropna().unique())):
+    if _u not in USER_COLORS:
+        USER_COLORS[_u] = PALETA_ASESORES[_i % len(PALETA_ASESORES)]
 
 # ---------------------------------------------------------
 # FILTROS DINÁMICOS
@@ -1533,6 +1579,11 @@ with tab_cap:
             respondidos = int(nuevos['Respondido'].sum())
             rapidos = int((nuevos['FRT_min'] < 15).sum())
             derivados = int((nuevos['Estado'] == 'Derivado a asesores').sum())
+            membresias = int(nuevos['Desenlace'].isin(DESENLACES_CIERRE).sum())
+            no_califica = int((nuevos['Desenlace'] == 'No califica').sum())
+            sin_clasificar = int((nuevos['Desenlace'] == 'Sin clasificar').sum())
+            con_desenlace = n_nuevos - sin_clasificar
+            conversion = membresias / n_nuevos * 100 if n_nuevos else np.nan
 
             section_header("EMBUDO", f"Recorrido del Lead en {linea_cap}",
                            subtitle="La unidad es el contacto único, no la conversación: en una línea de "
@@ -1540,8 +1591,9 @@ with tab_cap:
 
             etapas = pd.DataFrame({
                 'Etapa': ['Leads que escribieron', 'Recibieron respuesta',
-                          'Respondidos en menos de 15 min', 'Derivados a un asesor'],
-                'Leads': [n_nuevos, respondidos, rapidos, derivados]
+                          'Con desenlace registrado', 'Derivados a un asesor',
+                          'Membresías vendidas'],
+                'Leads': [n_nuevos, respondidos, con_desenlace, derivados, membresias]
             })
             etapas['% del total'] = (etapas['Leads'] / n_nuevos * 100) if n_nuevos else 0
 
@@ -1569,6 +1621,22 @@ with tab_cap:
             k[4].metric("Tasa de Derivación", f"{derivados/n_nuevos*100:.0f}%" if n_nuevos else "s/d",
                         help="Leads que después aparecen conversando en la línea de asesores.")
 
+            k2 = st.columns(5)
+            k2[0].metric("Membresías Vendidas", f"{membresias:,}",
+                         help="Leads con etiqueta «Membresia BDI» o «Membresia PLUS» cargada en el CRM.")
+            k2[1].metric("Tasa de Conversión", f"{conversion:.1f}%" if pd.notna(conversion) else "s/d",
+                         help="Membresías sobre leads reales. Es un piso: los leads sin etiquetar podrían "
+                              "incluir cierres no registrados.")
+            k2[2].metric("No Califica", f"{no_califica:,}",
+                         help="Mostraron interés pero no llegaban a los mínimos requeridos.")
+            k2[3].metric("Sin Clasificar", f"{sin_clasificar:,}",
+                         delta=f"{sin_clasificar/n_nuevos*100:.0f}% del total" if n_nuevos else None,
+                         delta_color="off",
+                         help="Leads sin ninguna etiqueta. No se sabe en qué terminaron.")
+            k2[4].metric("Cierre / Contactado", f"{membresias/respondidos*100:.1f}%" if respondidos else "s/d",
+                         help="Membresías sobre leads que efectivamente recibieron respuesta. "
+                              "Mide la efectividad de la conversación, no la cobertura.")
+
             conv_sin_resp = int(df_cap['FRT_min'].isna().sum())
             if conv_sin_resp > (n_nuevos - respondidos):
                 st.caption(f"⚠️ Ojo con la diferencia de unidades: **{n_nuevos - respondidos} lead(s) nunca "
@@ -1583,6 +1651,79 @@ with tab_cap:
                            "para detectar si el número comercial se está difundiendo donde no corresponde.")
 
             divider()
+
+            divider()
+
+            section_header("DESENLACE", "En Qué Terminó Cada Lead",
+                           subtitle="Se toman las etiquetas de todas las conversaciones del contacto: "
+                                    "la etiqueta de cierre suele cargarse en el último chat, no en el primero.")
+
+            conteo_des = (nuevos['Desenlace'].value_counts()
+                          .reindex(DESENLACES).dropna().reset_index())
+            conteo_des.columns = ['Desenlace', 'Leads']
+            conteo_des['Pct'] = conteo_des['Leads'] / n_nuevos * 100
+            conteo_des['Texto'] = conteo_des.apply(
+                lambda r: f"{int(r['Leads'])} ({r['Pct']:.0f}%)", axis=1)
+
+            fig_des = px.bar(
+                conteo_des[::-1], x='Leads', y='Desenlace', orientation='h', text='Texto',
+                color='Desenlace', color_discrete_map=DESENLACE_COLORS,
+                category_orders={'Desenlace': DESENLACES[::-1]},
+                title=f"Desenlace de los {n_nuevos} Leads Reales"
+            )
+            fig_des.update_traces(textposition='outside', cliponaxis=False)
+            fig_des = apply_bdi_theme(fig_des)
+            fig_des.update_layout(showlegend=False, xaxis_title="Leads", yaxis_title="",
+                                  height=420, margin=dict(t=70, b=55, l=200, r=120))
+            st.plotly_chart(fig_des, **ANCHO)
+
+            if n_nuevos and sin_clasificar / n_nuevos > 0.30:
+                st.warning(
+                    f"**{sin_clasificar} de {n_nuevos} leads ({sin_clasificar/n_nuevos*100:.0f}%) no tienen "
+                    "ninguna etiqueta.** La tasa de conversión que ves arriba es un piso, no el número real: "
+                    "si entre esos hubo cierres sin registrar, la conversión verdadera es más alta; si se "
+                    "perdieron, el problema está en el seguimiento. Mientras esa franja sea grande, "
+                    "el embudo no se puede leer con confianza.", icon="⚠️")
+
+            section_header("CIERRE POR ASESOR", "Quién Convierte",
+                           subtitle="Leads atendidos, membresías cerradas y cuánto queda sin clasificar.")
+            cierre = nuevos.groupby('Asesor').agg(
+                Leads=('contactNumber', 'nunique'),
+                Membresias=('Desenlace', lambda s: int(s.isin(DESENLACES_CIERRE).sum())),
+                No_Califica=('Desenlace', lambda s: int((s == 'No califica').sum())),
+                Derivados=('Desenlace', lambda s: int((s == 'Derivado a asesores').sum())),
+                Sin_Clasificar=('Desenlace', lambda s: int((s == 'Sin clasificar').sum())),
+            ).reset_index()
+            cierre['% Conversión'] = cierre['Membresias'] / cierre['Leads'] * 100
+            cierre['% Sin Clasificar'] = cierre['Sin_Clasificar'] / cierre['Leads'] * 100
+            cierre = cierre.sort_values('Leads', ascending=False)
+
+            st.dataframe(
+                cierre.rename(columns={'Membresias': 'Membresías', 'No_Califica': 'No Califica',
+                                       'Sin_Clasificar': 'Sin Clasificar'}).style.format({
+                    '% Conversión': '{:.1f}%', '% Sin Clasificar': '{:.0f}%'
+                }),
+                column_config={
+                    "% Conversión": st.column_config.NumberColumn(help="Membresías sobre leads atendidos por ese asesor."),
+                    "No Califica": st.column_config.NumberColumn(help="Interés real que no llegaba a los mínimos."),
+                    "Sin Clasificar": st.column_config.NumberColumn(help="Leads que ese asesor no etiquetó."),
+                },
+                hide_index=True, **ANCHO
+            )
+
+            fig_cie = px.bar(
+                nuevos.groupby(['Asesor', 'Desenlace']).size().reset_index(name='Leads'),
+                x='Leads', y='Asesor', color='Desenlace', orientation='h', text='Leads',
+                color_discrete_map=DESENLACE_COLORS, category_orders={'Desenlace': DESENLACES},
+                title="Composición de la Cartera de Leads por Asesor"
+            )
+            fig_cie.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14),
+                                  insidetextanchor='middle')
+            fig_cie = apply_bdi_theme(fig_cie, legend_below=True)
+            fig_cie.update_layout(barmode='stack', xaxis_title="Leads", yaxis_title="",
+                                  legend_title="Desenlace", height=420,
+                                  margin=dict(t=70, b=100, l=110, r=70))
+            st.plotly_chart(fig_cie, **ANCHO)
 
             section_header("VELOCIDAD", "Cuánto Tarda en Contestarse un Lead",
                            subtitle=f"Minutos de jornada laboral ({HORARIO_TXT} hs). En captación lo que "
@@ -1691,11 +1832,11 @@ with tab_cap:
             section_header("FLUJO", "Entrada de Leads y Ventanas sin Cobertura")
             col_f1, col_f2 = st.columns(2)
             with col_f1:
-                por_dia = leads.groupby(['fecha', 'Estado']).size().reset_index(name='Leads')
+                por_dia = nuevos.groupby(['fecha', 'Desenlace']).size().reset_index(name='Leads')
                 fig_fd = px.bar(
-                    por_dia, x='fecha', y='Leads', color='Estado',
-                    color_discrete_map={'Sin derivar': '#8FBF74', 'Derivado a asesores': '#0F5132',
-                                        'Ya era cliente': '#C9D2CE'},
+                    por_dia, x='fecha', y='Leads', color='Desenlace',
+                    color_discrete_map=DESENLACE_COLORS,
+                    category_orders={'Desenlace': DESENLACES},
                     title="Leads por Día y Desenlace"
                 )
                 fig_fd = apply_bdi_theme(fig_fd, legend_below=True)
@@ -1745,15 +1886,22 @@ with tab_cap:
                 st.info("Todavía ningún lead de esta línea aparece conversando en la línea de asesores. "
                         "Con pocos días de operación es esperable: la derivación en septiembre tardó entre 24 y 44 horas.")
 
-            st.markdown("""
----
-##### Lo que este tablero todavía no puede medir
+            divider()
 
-La derivación se detecta sola porque el contacto reaparece en la otra línea. **La venta de
-membresía no deja rastro en el CRM**, así que no hay forma de calcularla. Con una etiqueta por
-lead — `Derivado`, `Membresia`, `No califica`, `Sin interés` — estas mismas métricas pasan a
-mostrar conversión real por asesor y por origen, sin tocar el código.
-""")
+            section_header("DETALLE", "Lead por Lead")
+            filtro_des = st.multiselect("Filtrar por desenlace:", DESENLACES, default=DESENLACES,
+                                        key="filtro_desenlace")
+            det = nuevos[nuevos['Desenlace'].isin(filtro_des)].copy()
+            det = det.sort_values('Primer Chat', ascending=False)
+            det['Primer Chat'] = det['Primer Chat'].dt.strftime('%d/%m %H:%M')
+            st.caption(f"{len(det):,} leads en la selección.")
+            st.dataframe(
+                det[['contactName', 'Asesor', 'Primer Chat', 'Desenlace', 'FRT_min',
+                     'Conversaciones', 'Etiquetas']].rename(columns={
+                        'contactName': 'Lead', 'FRT_min': 'FRT (min laborales)',
+                        'Conversaciones': 'Chats'}).style.format({'FRT (min laborales)': '{:.0f}'}),
+                hide_index=True, **ANCHO
+            )
 
 
 # ---------------------------------------------------------
