@@ -10,6 +10,7 @@ import re
 import json
 import io
 import inspect
+import unicodedata
 import gdown
 import holidays
 from datetime import datetime, time
@@ -196,21 +197,34 @@ PALETA_ASESORES = ['#1F8A5C', '#3E92CC', '#C9A227', '#8FBF74', '#D6336C', '#0B3D
 
 # ===========================================================
 # DESENLACE DEL LEAD (solo línea comercial)
-# El orden ES la prioridad: un lead con "Membresia PLUS" y "Balanz" cuenta como
-# membresía vendida, no como "en gestión". Las dos primeras son las etiquetas de
-# cierre; "No califica" marca interés real que no llegó a los mínimos.
 # ===========================================================
-TAGS_MEMBRESIA_PLUS = 'membresia plus'
-TAGS_MEMBRESIA = 'membresia'
-TAG_NO_CALIFICA = 'no califica'
+# OJO con la diferencia, que es la que define si el número comercial sirve o no:
+#
+#   «Membresia - Comercial» → lead NUEVO que el comercial convirtió. ESTO es conversión.
+#   «Membresia BDI» / «Membresia PLUS» → socio que YA tenía membresía y escribe al
+#       comercial por una consulta administrativa. No es lead ni conversión: queda
+#       fuera del embudo para no inflar el numerador ni el denominador.
+#
+# Las etiquetas se comparan normalizadas (sin acentos, sin espacios ni guiones), así
+# «Membresia - Comercial», «Membresía-Comercial» y «membresia comercial» caen todas
+# en el mismo lugar sin depender de cómo se tipeó en Whaticket.
+TAG_CONVERSION = 'membresiacomercial'          # Membresia - Comercial
+TAGS_SOCIO = ('membresiabdi', 'membresiaplus')  # socio existente, consulta administrativa
+TAG_NO_CALIFICA = 'nocalifica'                  # interés real, no llega a los mínimos
 
-DESENLACES = ['Membresía PLUS', 'Membresía BDI', 'Derivado a asesores',
-              'No califica', 'En gestión', 'Sin clasificar']
+DESENLACES = ['Membresía vendida', 'Derivado a asesores', 'No califica',
+              'En gestión', 'Sin clasificar']
 DESENLACE_COLORS = {
-    'Membresía PLUS': '#0B3D27', 'Membresía BDI': '#157347', 'Derivado a asesores': '#3AAFB9',
-    'No califica': '#C9A227', 'En gestión': '#8FBF74', 'Sin clasificar': '#C9D2CE'
+    'Membresía vendida': '#0F5132', 'Derivado a asesores': '#3AAFB9', 'No califica': '#C9A227',
+    'En gestión': '#8FBF74', 'Sin clasificar': '#C9D2CE', 'Consulta de socio': '#B9C2BD'
 }
-DESENLACES_CIERRE = ['Membresía PLUS', 'Membresía BDI']
+DESENLACE_CONVERSION = 'Membresía vendida'
+DESENLACE_SOCIO = 'Consulta de socio'
+
+def normalizar_tag(texto):
+    """'Membresía - Comercial' → 'membresiacomercial'. Inmune a acentos, guiones y espacios."""
+    limpio = unicodedata.normalize('NFKD', str(texto)).encode('ascii', 'ignore').decode('ascii')
+    return re.sub(r'[^a-z0-9]', '', limpio.lower())
 ESTADO_COLORS = {'Potencial Cliente': '#C9A227', 'EX CLIENTE': '#AEB6B2', 'no es cliente': '#D6336C'}
 
 # Conexiones (líneas de WhatsApp). Los colores se asignan por volumen en runtime,
@@ -762,17 +776,21 @@ def analizar_captacion(df_linea, df_historia, linea):
             horas = np.nan
 
         # Desenlace comercial. Se juntan las etiquetas de TODAS las conversaciones del
-        # lead: la etiqueta de cierre suele cargarse en el último chat, no en el primero.
-        etiquetas = ','.join(g['tags'].dropna().astype(str)).lower()
-        if TAGS_MEMBRESIA_PLUS in etiquetas:
-            desenlace = 'Membresía PLUS'
-        elif TAGS_MEMBRESIA in etiquetas:
-            desenlace = 'Membresía BDI'
-        elif TAG_NO_CALIFICA in etiquetas:
+        # lead: la etiqueta de cierre se carga al final de la charla, no en el primer chat.
+        crudas = [t.strip() for x in g['tags'].dropna().astype(str) for t in x.split(',') if t.strip()]
+        normalizadas = {normalizar_tag(t) for t in crudas}
+
+        if TAG_CONVERSION in normalizadas:
+            # La conversión gana incluso si además ya figura como socio: primero cerró.
+            desenlace = DESENLACE_CONVERSION
+        elif normalizadas & set(TAGS_SOCIO):
+            # Socio existente con consulta administrativa: no es lead, queda fuera del embudo.
+            desenlace = DESENLACE_SOCIO
+        elif TAG_NO_CALIFICA in normalizadas:
             desenlace = 'No califica'
         elif estado == 'Derivado a asesores':
             desenlace = 'Derivado a asesores'
-        elif etiquetas.strip():
+        elif crudas:
             desenlace = 'En gestión'
         else:
             desenlace = 'Sin clasificar'
@@ -788,8 +806,7 @@ def analizar_captacion(df_linea, df_historia, linea):
             'Respondido': pd.notna(frt),
             'Estado': estado,
             'Desenlace': desenlace,
-            'Etiquetas': ', '.join(sorted({t.strip() for x in g['tags'].dropna().astype(str)
-                                           for t in x.split(',') if t.strip()})),
+            'Etiquetas': ', '.join(sorted(set(crudas))),
             'Horas a Derivación': horas,
             'hora_ingreso': primer_chat.hour if pd.notna(primer_chat) else np.nan,
             'fecha': primer_chat.date() if pd.notna(primer_chat) else None,
@@ -1574,12 +1591,18 @@ with tab_cap:
             st.info(f"No hay conversaciones de **{linea_cap}** en la selección actual.")
         else:
             total_leads = len(leads)
-            nuevos = leads[leads['Estado'] != 'Ya era cliente']
+            socios = leads[leads['Desenlace'] == DESENLACE_SOCIO]
+            ya_era_cliente = leads[(leads['Estado'] == 'Ya era cliente') &
+                                   (leads['Desenlace'] != DESENLACE_SOCIO)]
+            # Lead = contacto nuevo de verdad. Un socio preguntando algo administrativo
+            # no es captación, y contarlo distorsiona numerador y denominador a la vez.
+            nuevos = leads[(leads['Estado'] != 'Ya era cliente') &
+                           (leads['Desenlace'] != DESENLACE_SOCIO)]
             n_nuevos = len(nuevos)
             respondidos = int(nuevos['Respondido'].sum())
             rapidos = int((nuevos['FRT_min'] < 15).sum())
             derivados = int((nuevos['Estado'] == 'Derivado a asesores').sum())
-            membresias = int(nuevos['Desenlace'].isin(DESENLACES_CIERRE).sum())
+            membresias = int((nuevos['Desenlace'] == DESENLACE_CONVERSION).sum())
             no_califica = int((nuevos['Desenlace'] == 'No califica').sum())
             sin_clasificar = int((nuevos['Desenlace'] == 'Sin clasificar').sum())
             con_desenlace = n_nuevos - sin_clasificar
@@ -1623,7 +1646,8 @@ with tab_cap:
 
             k2 = st.columns(5)
             k2[0].metric("Membresías Vendidas", f"{membresias:,}",
-                         help="Leads con etiqueta «Membresia BDI» o «Membresia PLUS» cargada en el CRM.")
+                         help="Leads con la etiqueta «Membresia - Comercial». No cuenta «Membresia BDI» "
+                              "ni «Membresia PLUS»: esas marcan a un socio que ya tenía membresía.")
             k2[1].metric("Tasa de Conversión", f"{conversion:.1f}%" if pd.notna(conversion) else "s/d",
                          help="Membresías sobre leads reales. Es un piso: los leads sin etiquetar podrían "
                               "incluir cierres no registrados.")
@@ -1644,19 +1668,39 @@ with tab_cap:
                            "responder**. La diferencia son personas ya contestadas alguna vez que volvieron "
                            "a escribir y quedaron sin respuesta en ese segundo intento.")
 
-            ya_clientes = total_leads - n_nuevos
-            if ya_clientes:
-                st.caption(f"ℹ️ Además entraron **{ya_clientes} contactos que ya eran clientes** de la línea de "
-                           "asesores y escribieron a este número. No se cuentan como captación, pero sirven "
-                           "para detectar si el número comercial se está difundiendo donde no corresponde.")
+            partes = []
+            if len(socios):
+                partes.append(f"**{len(socios)} socios con membresía vigente** que escribieron por una "
+                              "consulta administrativa (etiqueta «Membresia BDI» o «Membresia PLUS»)")
+            if len(ya_era_cliente):
+                partes.append(f"**{len(ya_era_cliente)} contactos que ya eran clientes** de la línea de asesores")
+            if partes:
+                st.caption("ℹ️ Fuera del embudo: entraron además " + " y ".join(partes) +
+                           ". No son captación, pero miden cuánta carga administrativa absorbe el número "
+                           "comercial y si se está difundiendo donde no corresponde.")
+
+            # Una venta a alguien que YA era cliente de asesores es upsell, no captación:
+            # sale del embudo, pero no puede desaparecer del tablero.
+            upsell = int((leads['Desenlace'] == DESENLACE_CONVERSION).sum()) - membresias
+            if upsell > 0:
+                st.caption(f"💰 Además hubo **{upsell} venta(s) de membresía a contactos que ya eran clientes** "
+                           "de la línea de asesores. Son upsell, no captación de leads nuevos, así que no "
+                           "entran en la tasa de conversión de arriba — pero la venta se hizo por este número.")
+
+            if membresias == 0 and upsell == 0 and n_nuevos:
+                st.info("La etiqueta **«Membresia - Comercial»** todavía no aparece en ningún lead del "
+                        "período. El tablero ya la reconoce: en cuanto se cargue en Whaticket, estas "
+                        "métricas de conversión se llenan solas, sin tocar el código.", icon="🏷️")
 
             divider()
 
             divider()
 
             section_header("DESENLACE", "En Qué Terminó Cada Lead",
-                           subtitle="Se toman las etiquetas de todas las conversaciones del contacto: "
-                                    "la etiqueta de cierre suele cargarse en el último chat, no en el primero.")
+                           subtitle="Se leen las etiquetas de todas las conversaciones del contacto, porque "
+                                    "la de cierre se carga al final de la charla. Conversión = «Membresia - "
+                                    "Comercial»; «Membresia BDI» y «Membresia PLUS» marcan a un socio que ya "
+                                    "tenía membresía y quedan fuera del embudo.")
 
             conteo_des = (nuevos['Desenlace'].value_counts()
                           .reindex(DESENLACES).dropna().reset_index())
@@ -1669,7 +1713,7 @@ with tab_cap:
                 conteo_des[::-1], x='Leads', y='Desenlace', orientation='h', text='Texto',
                 color='Desenlace', color_discrete_map=DESENLACE_COLORS,
                 category_orders={'Desenlace': DESENLACES[::-1]},
-                title=f"Desenlace de los {n_nuevos} Leads Reales"
+                title=f"Desenlace de los {n_nuevos} Leads Reales (excluye socios y clientes existentes)"
             )
             fig_des.update_traces(textposition='outside', cliponaxis=False)
             fig_des = apply_bdi_theme(fig_des)
@@ -1689,7 +1733,7 @@ with tab_cap:
                            subtitle="Leads atendidos, membresías cerradas y cuánto queda sin clasificar.")
             cierre = nuevos.groupby('Asesor').agg(
                 Leads=('contactNumber', 'nunique'),
-                Membresias=('Desenlace', lambda s: int(s.isin(DESENLACES_CIERRE).sum())),
+                Membresias=('Desenlace', lambda s: int((s == DESENLACE_CONVERSION).sum())),
                 No_Califica=('Desenlace', lambda s: int((s == 'No califica').sum())),
                 Derivados=('Desenlace', lambda s: int((s == 'Derivado a asesores').sum())),
                 Sin_Clasificar=('Desenlace', lambda s: int((s == 'Sin clasificar').sum())),
@@ -1889,9 +1933,12 @@ with tab_cap:
             divider()
 
             section_header("DETALLE", "Lead por Lead")
-            filtro_des = st.multiselect("Filtrar por desenlace:", DESENLACES, default=DESENLACES,
-                                        key="filtro_desenlace")
-            det = nuevos[nuevos['Desenlace'].isin(filtro_des)].copy()
+            opciones_det = DESENLACES + [DESENLACE_SOCIO]
+            filtro_des = st.multiselect("Filtrar por desenlace:", opciones_det, default=DESENLACES,
+                                        key="filtro_desenlace",
+                                        help=f"«{DESENLACE_SOCIO}» está fuera del embudo; se puede sumar acá "
+                                             "para revisar qué consultas administrativas llegan al comercial.")
+            det = leads[leads['Desenlace'].isin(filtro_des)].copy()
             det = det.sort_values('Primer Chat', ascending=False)
             det['Primer Chat'] = det['Primer Chat'].dt.strftime('%d/%m %H:%M')
             st.caption(f"{len(det):,} leads en la selección.")
