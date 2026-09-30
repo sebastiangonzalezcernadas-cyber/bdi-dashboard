@@ -2409,46 +2409,63 @@ with tab4:
         comp['Pct'] = comp['Chats'] / total_mes * 100
 
         # Dentro de cada mes se ordena por volumen y se acumula: solo llevan etiqueta los
-        # primeros asesores hasta cubrir el porcentaje elegido.
+        # primeros asesores hasta cubrir el porcentaje elegido. Además se exige un piso de
+        # altura, porque una porción de 2 % no tiene lugar físico para tres líneas de texto.
         comp = comp.sort_values(['periodo', 'Chats'], ascending=[True, False])
         comp['Acumulado'] = comp.groupby('periodo')['Pct'].cumsum()
         comp['Rango'] = comp.groupby('periodo').cumcount()
-        etiquetar = (comp['Acumulado'] - comp['Pct'] < cobertura) | (comp['Rango'] == 0)
-        comp['Texto'] = np.where(etiquetar,
-                                 comp['Chats'].astype(int).astype(str) + '<br>' +
-                                 comp['Pct'].round(0).astype(int).astype(str) + '%',
-                                 '')
+        PISO_ALTURA = 4.0
+        comp['Etiquetar'] = (((comp['Acumulado'] - comp['Pct'] < cobertura) | (comp['Rango'] == 0))
+                             & (comp['Pct'] >= PISO_ALTURA))
 
-        # El asesor de mayor volumen total va abajo del apilado, para que la base quede estable.
+        periodos_x = [p for p in periodos_disponibles if p in set(comp['periodo'])]
+        # De mayor a menor volumen total: el asesor más grande queda en la base del apilado,
+        # así la referencia visual no salta de un mes a otro.
         orden_asesores = (comp.groupby('user')['Chats'].sum()
                           .sort_values(ascending=False).index.tolist())
 
-        fig_comp = px.bar(
-            comp, x='periodo', y='Chats', color='user', text='Texto',
-            color_discrete_map=USER_COLORS,
-            category_orders={'periodo': periodos_disponibles, 'user': orden_asesores},
-            custom_data=['user', 'Pct'],
-            title=f"Chats por Asesor y Mes · {conx_comp}"
-        )
-        fig_comp.update_traces(
-            textposition='inside', insidetextanchor='middle',
-            textfont=dict(color='#FFFFFF', size=14),
-            marker=dict(line=dict(color='#FFFFFF', width=1.5)),
-            hovertemplate="<b>%{customdata[0]}</b><br>%{x}<br>Chats: %{y}<br>Peso del mes: %{customdata[1]:.1f}%<extra></extra>"
-        )
+        # Se arma con go.Bar en vez de px.bar: px le pone un offsetgroup distinto a cada
+        # trace y, según la versión de plotly, eso hace que las barras se dibujen una al
+        # lado de la otra en vez de apiladas. Con go.Bar el apilado es determinístico.
+        fig_comp = go.Figure()
+        for asesor in orden_asesores:
+            g = comp[comp['user'] == asesor].set_index('periodo').reindex(periodos_x)
+            chats = g['Chats'].fillna(0)
+            pct = g['Pct'].fillna(0)
+            textos = [
+                f"{asesor}<br>{int(c)} · {p:.0f}%" if bool(e) else ""
+                for c, p, e in zip(chats, pct, g['Etiquetar'].fillna(False))
+            ]
+            fig_comp.add_bar(
+                x=periodos_x, y=chats, name=asesor, text=textos,
+                marker=dict(color=USER_COLORS.get(asesor), line=dict(color='#FFFFFF', width=1.5)),
+                textposition='inside', insidetextanchor='middle',
+                textfont=dict(color='#FFFFFF', size=14, family='Inter, Segoe UI, sans-serif'),
+                textangle=0, cliponaxis=False,
+                customdata=np.stack([pct.values], axis=-1),
+                hovertemplate=f"<b>{asesor}</b><br>%{{x}}<br>Chats: %{{y}}"
+                              "<br>Peso del mes: %{customdata[0]:.1f}%<extra></extra>"
+            )
+
         fig_comp = apply_bdi_theme(fig_comp, legend_below=True)
         fig_comp.update_layout(
+            title=dict(text=f"Chats por Asesor y Mes · {conx_comp}",
+                       font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
             barmode='stack',
+            bargap=0.15,                      # barras anchas: poco aire entre meses
             xaxis_title="Período", yaxis_title="Conversaciones", legend_title="Asesor",
-            height=560, xaxis=dict(tickangle=-30),
-            margin=dict(t=70, b=110, l=80, r=60)
+            height=720, xaxis=dict(tickangle=-25, tickfont=dict(size=14)),
+            uniformtext=dict(minsize=12, mode='hide'),  # si no entra, se oculta: nunca se solapa
+            margin=dict(t=80, b=130, l=90, r=60)
         )
         st.plotly_chart(fig_comp, **ANCHO)
 
+        etiquetar = comp['Etiquetar']
         sin_etiqueta = int((~etiquetar).sum())
         if sin_etiqueta:
-            st.caption(f"Quedaron {sin_etiqueta} porciones sin número encima por representar la cola "
-                       f"del {100 - cobertura}% de su mes. Siguen contando en la barra y el dato "
+            st.caption(f"Quedaron {sin_etiqueta} porciones sin texto: o caen en la cola del "
+                       f"{100 - cobertura}% de su mes, o pesan menos del {PISO_ALTURA:.0f}% y no hay "
+                       "lugar físico para escribir adentro. Siguen contando en la barra y el detalle "
                        "aparece al pasar el cursor.")
 
     divider()
