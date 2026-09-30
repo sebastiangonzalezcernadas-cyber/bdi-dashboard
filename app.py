@@ -2383,6 +2383,76 @@ with tab4:
 
     divider()
 
+    section_header("COMPOSICIÓN MENSUAL", "Reparto de Chats por Asesor, Mes a Mes",
+                   subtitle="Cada barra es un mes completo. La altura es el volumen; los colores, quién lo atendió.")
+
+    opciones_conx = ['Todas las conexiones'] + list(conexiones_disponibles)
+    conx_comp = st.radio("Conexión a mostrar:", opciones_conx, horizontal=True, key="radio_comp_mensual",
+                         help="Los asesores atienden en las dos líneas. Separarlas muestra repartos "
+                              "muy distintos: la comercial la concentran pocas personas.")
+
+    df_comp = df if conx_comp == 'Todas las conexiones' else df[df['conexion'] == conx_comp]
+
+    if df_comp.empty:
+        st.info(f"No hay conversaciones de **{conx_comp}** con los filtros actuales.")
+    else:
+        cobertura = st.slider(
+            "Etiquetar a los asesores que cubren este % del mes:", 50, 100, 90, step=5,
+            key="slider_cobertura_mes",
+            help="Se etiquetan los asesores de mayor volumen hasta llegar a ese porcentaje del mes. "
+                 "Los que quedan abajo siguen en la barra y en el hover, pero sin número encima, "
+                 "para que no se amontonen las porciones chicas."
+        )
+
+        comp = df_comp.groupby(['periodo', 'user'])[COL_ID].nunique().reset_index(name='Chats')
+        total_mes = comp.groupby('periodo')['Chats'].transform('sum')
+        comp['Pct'] = comp['Chats'] / total_mes * 100
+
+        # Dentro de cada mes se ordena por volumen y se acumula: solo llevan etiqueta los
+        # primeros asesores hasta cubrir el porcentaje elegido.
+        comp = comp.sort_values(['periodo', 'Chats'], ascending=[True, False])
+        comp['Acumulado'] = comp.groupby('periodo')['Pct'].cumsum()
+        comp['Rango'] = comp.groupby('periodo').cumcount()
+        etiquetar = (comp['Acumulado'] - comp['Pct'] < cobertura) | (comp['Rango'] == 0)
+        comp['Texto'] = np.where(etiquetar,
+                                 comp['Chats'].astype(int).astype(str) + '<br>' +
+                                 comp['Pct'].round(0).astype(int).astype(str) + '%',
+                                 '')
+
+        # El asesor de mayor volumen total va abajo del apilado, para que la base quede estable.
+        orden_asesores = (comp.groupby('user')['Chats'].sum()
+                          .sort_values(ascending=False).index.tolist())
+
+        fig_comp = px.bar(
+            comp, x='periodo', y='Chats', color='user', text='Texto',
+            color_discrete_map=USER_COLORS,
+            category_orders={'periodo': periodos_disponibles, 'user': orden_asesores},
+            custom_data=['user', 'Pct'],
+            title=f"Chats por Asesor y Mes · {conx_comp}"
+        )
+        fig_comp.update_traces(
+            textposition='inside', insidetextanchor='middle',
+            textfont=dict(color='#FFFFFF', size=14),
+            marker=dict(line=dict(color='#FFFFFF', width=1.5)),
+            hovertemplate="<b>%{customdata[0]}</b><br>%{x}<br>Chats: %{y}<br>Peso del mes: %{customdata[1]:.1f}%<extra></extra>"
+        )
+        fig_comp = apply_bdi_theme(fig_comp, legend_below=True)
+        fig_comp.update_layout(
+            barmode='stack',
+            xaxis_title="Período", yaxis_title="Conversaciones", legend_title="Asesor",
+            height=560, xaxis=dict(tickangle=-30),
+            margin=dict(t=70, b=110, l=80, r=60)
+        )
+        st.plotly_chart(fig_comp, **ANCHO)
+
+        sin_etiqueta = int((~etiquetar).sum())
+        if sin_etiqueta:
+            st.caption(f"Quedaron {sin_etiqueta} porciones sin número encima por representar la cola "
+                       f"del {100 - cobertura}% de su mes. Siguen contando en la barra y el dato "
+                       "aparece al pasar el cursor.")
+
+    divider()
+
     section_header("PATRIMONIO", "Distribución de Cartera por Asesor")
     df_user_tier = df[df['tier'] != 'Sin Etiqueta Monto']
     asesores_activos = df_user_tier['user'].dropna().unique()
