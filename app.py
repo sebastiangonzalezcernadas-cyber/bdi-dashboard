@@ -1046,6 +1046,96 @@ def procesar(df, dedup=True):
 # -----------------------------------------------------------
 # GRÁFICO COMPARTIDO: COMPOSICIÓN PATRIMONIAL POR ASESOR
 # -----------------------------------------------------------
+def fig_composicion_mensual(d, periodos_orden, top_n=5, para_pdf=False):
+    """Barras apiladas por mes, partidas por asesor.
+
+    Regla de legibilidad: los primeros `top_n` asesores de cada mes SIEMPRE muestran
+    nombre, cantidad y porcentaje. Se intenta en dos líneas adentro de la porción; si
+    no hay alto, en una línea; y si tampoco entra, en una etiqueta fuera de la barra
+    con una flecha que señala su porción. En un PDF no hay hover, así que ningún dato
+    puede quedar escondido.
+    """
+    comp = d.groupby(['periodo', 'user'])[COL_ID].nunique().reset_index(name='Chats')
+    if comp.empty:
+        return None
+    comp['Pct'] = comp['Chats'] / comp.groupby('periodo')['Chats'].transform('sum') * 100
+    comp = comp.sort_values(['periodo', 'Chats'], ascending=[True, False])
+    comp['Rango'] = comp.groupby('periodo').cumcount()
+
+    periodos_x = [p for p in periodos_orden if p in set(comp['periodo'])]
+    orden_u = comp.groupby('user')['Chats'].sum().sort_values(ascending=False).index.tolist()
+    total_max = comp.groupby('periodo')['Chats'].sum().max() or 1
+
+    alto = 700 if para_pdf else 660
+    alto_plot = alto - 250                     # alto aproximado del área de trazado
+    px_por_chat = alto_plot / total_max
+    ALTO_DOS_LINEAS, ALTO_UNA_LINEA = 32, 16
+
+    # Base acumulada de cada porción: las trazas se apilan en el orden de `orden_u`.
+    base = {p: 0.0 for p in periodos_x}
+    centros, fuera = {}, []
+
+    fig = go.Figure()
+    for asesor in orden_u:
+        g = comp[comp['user'] == asesor].set_index('periodo').reindex(periodos_x)
+        chats = g['Chats'].fillna(0)
+        pct = g['Pct'].fillna(0)
+        rango = g['Rango'].fillna(99)
+        textos = []
+        for p, c, pc, rk in zip(periodos_x, chats, pct, rango):
+            centro = base[p] + c / 2
+            centros[(p, asesor)] = centro
+            base[p] += c
+            if c <= 0 or rk >= top_n:
+                textos.append("")
+                continue
+            alto_seg = c * px_por_chat
+            if alto_seg >= ALTO_DOS_LINEAS:
+                textos.append(f"{asesor}<br>{int(c)} · {pc:.0f}%")
+            elif alto_seg >= ALTO_UNA_LINEA:
+                textos.append(f"{asesor} {int(c)} · {pc:.0f}%")
+            else:
+                textos.append("")
+                fuera.append((p, asesor, int(c), pc, centro))
+        fig.add_bar(
+            x=periodos_x, y=chats, name=asesor, text=textos,
+            marker=dict(color=USER_COLORS.get(asesor), line=dict(color='#FFFFFF', width=1.5)),
+            textposition='inside', insidetextanchor='middle',
+            textfont=dict(color='#FFFFFF', size=14 if para_pdf else 13,
+                          family='Inter, Segoe UI, sans-serif'),
+            textangle=0, cliponaxis=False,
+            customdata=np.stack([pct.values], axis=-1),
+            hovertemplate=f"<b>{asesor}</b><br>%{{x}}<br>Chats: %{{y}}"
+                          "<br>Peso del mes: %{customdata[0]:.1f}%<extra></extra>"
+        )
+
+    # Lo que no entró adentro se dibuja al costado, con flecha a su porción.
+    # Se escalonan verticalmente para que dos etiquetas del mismo mes no se pisen.
+    por_periodo = {}
+    for p, asesor, c, pc, centro in sorted(fuera, key=lambda t: (t[0], -t[4])):
+        n = por_periodo.get(p, 0)
+        por_periodo[p] = n + 1
+        fig.add_annotation(
+            x=p, y=centro, xref='x', yref='y',
+            text=f"<b>{asesor}</b> {c} · {pc:.0f}%",
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.4,
+            arrowcolor=USER_COLORS.get(asesor, '#5B6E67'),
+            ax=52, ay=-30 - n * 26, xanchor='left',
+            font=dict(size=12 if para_pdf else 11, color='#1A252C'),
+            bgcolor='rgba(255,255,255,0.92)',
+            bordercolor=USER_COLORS.get(asesor, '#DDE5E1'), borderwidth=1, borderpad=3
+        )
+
+    fig.update_layout(
+        barmode='stack', bargap=0.18,
+        title=dict(text="Reparto de la Carga entre Asesores, Mes a Mes",
+                   font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
+        height=alto, xaxis_title="", yaxis_title="Conversaciones",
+        xaxis=dict(tickangle=-25, tickfont=dict(size=14)),
+        uniformtext=dict(minsize=11, mode='show')
+    )
+    return fig
+
 def fig_patrimonio_por_asesor(d, para_pdf=False):
     """Una torta por asesor con su mix de segmentos patrimoniales.
 
@@ -1076,9 +1166,10 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
             labels=list(g.index), values=list(g.values), hole=0.38,
             marker=dict(colors=[TIER_COLORS[t] for t in g.index],
                         line=dict(color='#FFFFFF', width=2)),
-            texttemplate='%{value}<br>%{percent}', textposition='inside',
-            textfont=dict(size=16 if para_pdf else 12, color='#FFFFFF'),
+            texttemplate='%{value}<br>%{percent}', textposition='auto',
+            textfont=dict(size=16 if para_pdf else 12),
             insidetextorientation='horizontal',
+            outsidetextfont=dict(size=14 if para_pdf else 11, color='#1A252C'),
             sort=False, showlegend=(i == 0),
             hovertemplate="<b>%{label}</b><br>%{value} chats (%{percent})<extra></extra>"
         ), row=i // cols + 1, col=i % cols + 1)
@@ -1096,7 +1187,7 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
         plot_bgcolor='rgba(0,0,0,0)',
         font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=14),
         margin=dict(t=90, b=90, l=30, r=30),
-        uniformtext=dict(minsize=11, mode='hide')
+        uniformtext=dict(minsize=10, mode='show')
     )
     return fig
 
@@ -1124,7 +1215,7 @@ def _tema_pdf(fig, alto, leyenda=False, izq=70, inf=70):
         title=dict(font=dict(color='#0F5132', size=19), x=0.01, xanchor='left'),
         paper_bgcolor='#FFFFFF', plot_bgcolor='#FFFFFF',
         height=alto, margin=dict(t=64, b=inf, l=izq, r=60),
-        uniformtext=dict(minsize=11, mode='hide'),
+        uniformtext=dict(minsize=10, mode='show'),
         showlegend=leyenda
     )
     if leyenda:
@@ -1236,31 +1327,15 @@ def figuras_asesores(d, linea, periodos_orden):
                            f, ratio=0.235))
 
     # 4 · Composición mensual por asesor
-    comp = d.groupby(['periodo', 'user'])[COL_ID].nunique().reset_index(name='Chats')
-    if not comp.empty:
-        comp['Pct'] = comp['Chats'] / comp.groupby('periodo')['Chats'].transform('sum') * 100
-        orden_u = comp.groupby('user')['Chats'].sum().sort_values(ascending=False).index.tolist()
-        px_ord = [p for p in periodos_orden if p in set(comp['periodo'])]
-        f = go.Figure()
-        for asesor in orden_u:
-            g = comp[comp['user'] == asesor].set_index('periodo').reindex(px_ord)
-            ch, pc = g['Chats'].fillna(0), g['Pct'].fillna(0)
-            txt = [f"{asesor}<br>{int(c)} · {p:.0f}%" if p >= 7 else "" for c, p in zip(ch, pc)]
-            f.add_bar(x=px_ord, y=ch, name=asesor, text=txt,
-                      marker=dict(color=USER_COLORS.get(asesor), line=dict(color='#FFFFFF', width=1.5)),
-                      textposition='inside', insidetextanchor='middle',
-                      textfont=dict(color='#FFFFFF', size=13))
-        f.update_layout(barmode='stack', bargap=0.18,
-                        title=dict(text="Reparto de la Carga entre Asesores, Mes a Mes",
-                                   font=dict(color='#0F5132', size=19), x=0.01))
-        _tema_pdf(f, 620, leyenda=True, inf=140)
-        f.update_layout(xaxis_title="", yaxis_title="Conversaciones",
-                        xaxis=dict(tickangle=-25, tickfont=dict(size=14)),
-                        legend=dict(font=dict(size=15)))
+    f = fig_composicion_mensual(d, periodos_orden, top_n=5, para_pdf=True)
+    if f is not None:
+        _tema_pdf(f, 700, leyenda=True, inf=150)
+        f.update_layout(margin=dict(t=70, b=150, l=90, r=150), legend=dict(font=dict(size=15)))
         items.append(_item("Reparto del volumen dentro del equipo, mes a mes",
-                           "Cada barra es un mes completo, dividido por asesor, con cantidad y peso "
-                           "relativo. Las porciones que pesan menos del 7% van sin número para que el "
-                           "texto no se amontone. Sirve para ver cómo se distribuye la carga y cómo "
+                           "Cada barra es un mes completo, dividido por asesor. Los cinco de mayor "
+                           "volumen de cada mes siempre muestran nombre, cantidad y porcentaje: cuando "
+                           "la porción es demasiado fina para escribir adentro, la etiqueta sale al "
+                           "costado con una flecha. Sirve para ver cómo se distribuye la carga y cómo "
                            "evoluciona esa distribución a lo largo del año.", f, ratio=0.50, solo=True))
 
     # 5 · Rendimiento por asesor (tabla)
@@ -1329,8 +1404,8 @@ def figuras_asesores(d, linea, periodos_orden):
         bu.columns = ['Broker', 'Personas']
         f = px.pie(bu, values='Personas', names='Broker', hole=0.45, color='Broker',
                    color_discrete_map=BROKER_COLORS, title="Personas Únicas por Broker")
-        f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='inside',
-                        textfont=dict(size=19, color='#FFFFFF'),
+        f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='auto',
+                        textfont=dict(size=19), outsidetextfont=dict(size=15, color='#1A252C'),
                         marker=dict(line=dict(color='#FFFFFF', width=2)))
         _tema_pdf(f, 560, leyenda=True, izq=20, inf=130)
         f.update_layout(legend=dict(font=dict(size=16)), margin=dict(t=64, b=130, l=20, r=20))
@@ -1346,8 +1421,8 @@ def figuras_asesores(d, linea, periodos_orden):
         f = px.pie(tu, values='Personas', names='Segmento', hole=0.45, color='Segmento',
                    color_discrete_map=TIER_COLORS, category_orders={'Segmento': TIERS},
                    title="Personas Únicas por Segmento Patrimonial")
-        f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='inside',
-                        textfont=dict(size=19, color='#FFFFFF'),
+        f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='auto',
+                        textfont=dict(size=19), outsidetextfont=dict(size=15, color='#1A252C'),
                         marker=dict(line=dict(color='#FFFFFF', width=2)))
         _tema_pdf(f, 560, leyenda=True, izq=20, inf=150)
         f.update_layout(legend=dict(font=dict(size=15)), margin=dict(t=64, b=150, l=20, r=20))
@@ -1458,27 +1533,43 @@ def figuras_comercial(d, linea, df_historia):
               text=['', f"{n_leads} leads reales · {pc(n_leads, total)}", f"{total} contactos únicos"],
               textposition='inside', insidetextanchor='middle',
               textfont=dict(color='#FFFFFF', size=16), showlegend=False)
+    acum_g, fuera_g = 0.0, []
+    for et, val in [(DES_MEMBRESIA, n_mem), (DES_CONSULTORIA, n_con), (DES_DERIVADO, n_der)]:
+        if val and val / amax < 0.06:
+            fuera_g.append((et, val, (amax - ganados) / 2 + acum_g + val / 2))
+        acum_g += val
+
+    anotados = {et for et, _, _ in fuera_g}
     for et, val in [(DES_MEMBRESIA, n_mem), (DES_CONSULTORIA, n_con), (DES_DERIVADO, n_der)]:
         corto = et.split(' - ')[0].split(' a ')[0]
         f.add_bar(y=ys, x=[val, 0, 0], orientation='h', name=et,
                   marker=dict(color=DESENLACE_COLORS[et], line=dict(color='#FFFFFF', width=2)),
-                  text=[f"{corto}<br>{val} · {pc(val, n_leads)}" if val else '', '', ''],
+                  text=[f"{corto}<br>{val} · {pc(val, n_leads)}" if (val and et not in anotados) else '', '', ''],
                   textposition='inside', insidetextanchor='middle',
                   textfont=dict(color='#FFFFFF', size=14))
+    for k, (et, val, xpos) in enumerate(fuera_g):
+        f.add_annotation(x=xpos, y='3 · Leads ganados', xref='x', yref='y',
+                         text=f"<b>{et.split(' - ')[0].split(' a ')[0]}</b> {val} · {pc(val, n_leads)}",
+                         showarrow=True, arrowhead=2, arrowwidth=1.4,
+                         arrowcolor=DESENLACE_COLORS[et], ax=0, ay=46 + k * 28,
+                         font=dict(size=12, color='#1A252C'), bgcolor='rgba(255,255,255,0.93)',
+                         bordercolor=DESENLACE_COLORS[et], borderwidth=1, borderpad=3)
+
     f.update_layout(barmode='stack', bargap=0.3,
                     title=dict(text=f"Embudo Comercial · {linea}",
                                font=dict(color='#0F5132', size=19), x=0.01))
-    _tema_pdf(f, 400, leyenda=True, izq=230, inf=120)
+    _tema_pdf(f, 440, leyenda=True, izq=230, inf=160)
     f.update_layout(xaxis=dict(visible=False, range=[0, amax * 1.02]),
                     yaxis=dict(showgrid=False, tickfont=dict(color='#0F5132', size=15),
                                categoryorder='array', categoryarray=ys))
-    for fila, cant, txt, col in [('2 · Leads reales', n_cli, 'ya eran clientes', '#8A6D00'),
-                                 ('3 · Leads ganados', n_leads - ganados, 'sin cerrar', '#7A867F')]:
+    for fila, cant, txt, col, desp in [
+            ('2 · Leads reales', n_cli, 'ya eran clientes', '#8A6D00', 6),
+            ('3 · Leads ganados', n_leads - ganados, 'sin cerrar todavía', '#7A867F', -6)]:
         if cant:
             f.add_annotation(xref='paper', x=1.015, y=fila, xanchor='left', yanchor='middle',
-                             text=f"<b>−{cant}</b><br><span style='font-size:12px'>{txt}</span>",
-                             showarrow=False, align='left', font=dict(color=col, size=14))
-    f.update_layout(margin=dict(t=64, b=120, l=230, r=170))
+                             text=f"<b>−{cant}</b> {txt}", yshift=desp,
+                             showarrow=False, align='left', font=dict(color=col, size=13))
+    f.update_layout(margin=dict(t=64, b=160, l=230, r=170))
     items.append(_item("Del primer mensaje a la venta",
                        "Tres escalones: todo lo que entró, lo que era lead de verdad y lo que se ganó. "
                        "El último se abre en las tres formas de ganarlo — membresía, consultoría o "
@@ -1488,19 +1579,32 @@ def figuras_comercial(d, linea, df_historia):
     cats = [(DES_MEMBRESIA, n_mem), (DES_CONSULTORIA, n_con), (DES_DERIVADO, n_der),
             (DES_NO_CALIFICA, n_nc), (DES_EN_PROCESO, n_ep), (DES_SIN_DEFINIR, n_sd)]
     f = go.Figure()
+    finos = {et for et, val in cats if val and n_leads and val / n_leads < 0.05}
     for et, val in cats:
         if not val:
             continue
         p = val / n_leads * 100 if n_leads else 0
         f.add_bar(y=['Leads reales'], x=[val], orientation='h', name=et,
                   marker=dict(color=DESENLACE_COLORS[et], line=dict(color='#FFFFFF', width=2)),
-                  text=[f"{val}<br>{p:.0f}%"], textposition='inside', insidetextanchor='middle',
+                  text=[f"{val}<br>{p:.0f}%" if et not in finos else ''], textposition='inside', insidetextanchor='middle',
                   textfont=dict(color='#FFFFFF' if et != DES_SIN_DEFINIR else '#14382A', size=14))
+    acum_c = 0.0
+    for et, val in cats:
+        if val and n_leads and val / n_leads < 0.05:
+            f.add_annotation(x=acum_c + val / 2, y='Leads reales', xref='x', yref='y',
+                             text=f"<b>{et}</b> {val} · {val/n_leads*100:.0f}%",
+                             showarrow=True, arrowhead=2, arrowwidth=1.4,
+                             arrowcolor=DESENLACE_COLORS[et], ax=0, ay=-40,
+                             font=dict(size=11, color='#1A252C'), bgcolor='rgba(255,255,255,0.93)',
+                             bordercolor=DESENLACE_COLORS[et], borderwidth=1, borderpad=3)
+        acum_c += val
+
     f.update_layout(barmode='stack', bargap=0.65,
                     title=dict(text=f"Desglose Completo de los {n_leads} Leads Reales",
                                font=dict(color='#0F5132', size=19), x=0.01))
-    _tema_pdf(f, 300, leyenda=True, izq=40, inf=110)
-    f.update_layout(xaxis=dict(visible=False), yaxis=dict(showticklabels=False, showgrid=False))
+    _tema_pdf(f, 340, leyenda=True, izq=40, inf=110)
+    f.update_layout(xaxis=dict(visible=False), yaxis=dict(showticklabels=False, showgrid=False),
+                    margin=dict(t=92, b=135, l=40, r=40))
     items.append(_item("En qué terminó cada lead",
                        "El hueco entre leads y ganados no es una sola cosa. «No aplica» es un descarte "
                        "decidido, «En proceso» una charla abierta y «Sin definir» un desenlace que nadie "
@@ -2421,76 +2525,23 @@ with tab_ase:
     if df_comp.empty:
         st.info(f"No hay conversaciones de **{conx_comp}** con los filtros actuales.")
     else:
-        cobertura = st.slider(
-            "Etiquetar a los asesores que cubren este % del mes:", 50, 100, 90, step=5,
-            key="slider_cobertura_mes",
-            help="Se etiquetan los asesores de mayor volumen hasta llegar a ese porcentaje del mes. "
-                 "Los que quedan abajo siguen en la barra y en el hover, pero sin número encima, "
-                 "para que no se amontonen las porciones chicas."
+        top_n = st.slider(
+            "Asesores a etiquetar en cada mes:", 3, 8, 5, key="slider_top_mes",
+            help="Los primeros de cada mes por volumen. Siempre muestran nombre, cantidad y "
+                 "porcentaje: si la porción es muy finita para escribir adentro, la etiqueta "
+                 "sale al costado con una flecha. Ningún dato queda solo en el hover."
         )
 
-        comp = df_comp.groupby(['periodo', 'user'])[COL_ID].nunique().reset_index(name='Chats')
-        total_mes = comp.groupby('periodo')['Chats'].transform('sum')
-        comp['Pct'] = comp['Chats'] / total_mes * 100
-
-        # Dentro de cada mes se ordena por volumen y se acumula: solo llevan etiqueta los
-        # primeros asesores hasta cubrir el porcentaje elegido. Además se exige un piso de
-        # altura, porque una porción de 2 % no tiene lugar físico para tres líneas de texto.
-        comp = comp.sort_values(['periodo', 'Chats'], ascending=[True, False])
-        comp['Acumulado'] = comp.groupby('periodo')['Pct'].cumsum()
-        comp['Rango'] = comp.groupby('periodo').cumcount()
-        PISO_ALTURA = 4.0
-        comp['Etiquetar'] = (((comp['Acumulado'] - comp['Pct'] < cobertura) | (comp['Rango'] == 0))
-                             & (comp['Pct'] >= PISO_ALTURA))
-
-        periodos_x = [p for p in periodos_disponibles if p in set(comp['periodo'])]
-        # De mayor a menor volumen total: el asesor más grande queda en la base del apilado,
-        # así la referencia visual no salta de un mes a otro.
-        orden_asesores = (comp.groupby('user')['Chats'].sum()
-                          .sort_values(ascending=False).index.tolist())
-
-        # Se arma con go.Bar en vez de px.bar: px le pone un offsetgroup distinto a cada
-        # trace y, según la versión de plotly, eso hace que las barras se dibujen una al
-        # lado de la otra en vez de apiladas. Con go.Bar el apilado es determinístico.
-        fig_comp = go.Figure()
-        for asesor in orden_asesores:
-            g = comp[comp['user'] == asesor].set_index('periodo').reindex(periodos_x)
-            chats = g['Chats'].fillna(0)
-            pct = g['Pct'].fillna(0)
-            textos = [
-                f"{asesor}<br>{int(c)} · {p:.0f}%" if bool(e) else ""
-                for c, p, e in zip(chats, pct, g['Etiquetar'].fillna(False))
-            ]
-            fig_comp.add_bar(
-                x=periodos_x, y=chats, name=asesor, text=textos,
-                marker=dict(color=USER_COLORS.get(asesor), line=dict(color='#FFFFFF', width=1.5)),
-                textposition='inside', insidetextanchor='middle',
-                textfont=dict(color='#FFFFFF', size=14, family='Inter, Segoe UI, sans-serif'),
-                textangle=0, cliponaxis=False,
-                customdata=np.stack([pct.values], axis=-1),
-                hovertemplate=f"<b>{asesor}</b><br>%{{x}}<br>Chats: %{{y}}"
-                              "<br>Peso del mes: %{customdata[0]:.1f}%<extra></extra>"
-            )
-
-        fig_comp = apply_bdi_theme(fig_comp, legend_below=True)
-        fig_comp.update_layout(
-            title=dict(text=f"Chats por Asesor y Mes · {conx_comp}",
-                       font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
-            barmode='stack',
-            bargap=0.15,                      # barras anchas: poco aire entre meses
-            xaxis_title="Período", yaxis_title="Conversaciones", legend_title="Asesor",
-            height=720, xaxis=dict(tickangle=-25, tickfont=dict(size=14)),
-            uniformtext=dict(minsize=12, mode='hide'),  # si no entra, se oculta: nunca se solapa
-            margin=dict(t=80, b=130, l=90, r=60)
-        )
-        grafico(fig_comp, 'Composición mensual por asesor', 'asesores')
-
-        etiquetar = comp['Etiquetar']
-        sin_etiqueta = int((~etiquetar).sum())
-        if sin_etiqueta:
-            st.caption(f"Quedaron {sin_etiqueta} porciones sin texto: o caen en la cola del "
-                       f"{100 - cobertura}% de su mes, o pesan menos del {PISO_ALTURA:.0f}% y no hay "
-                       "lugar físico para escribir adentro. Siguen contando en la barra y el detalle "
+        fig_comp = fig_composicion_mensual(df_comp, periodos_disponibles, top_n=top_n)
+        if fig_comp is None:
+            st.info("No hay datos para componer el gráfico con los filtros actuales.")
+        else:
+            fig_comp = apply_bdi_theme(fig_comp, legend_below=True)
+            fig_comp.update_layout(legend_title="Asesor", uniformtext=dict(minsize=11, mode='show'),
+                                   margin=dict(t=80, b=120, l=90, r=130))
+            grafico(fig_comp, 'Composición mensual por asesor', 'asesores')
+            st.caption(f"Se etiquetan los {top_n} asesores de mayor volumen de cada mes. "
+                       "El resto de las porciones conserva su color y su altura; el detalle "
                        "aparece al pasar el cursor.")
 
     divider()
@@ -2518,7 +2569,8 @@ with tab_car:
             color='Broker', color_discrete_map=BROKER_COLORS,
             title="Personas Únicas Atendidas por Broker"
         )
-        fig_broker_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
+        fig_broker_usr.update_traces(texttemplate='%{value}<br>%{percent}', textposition='auto',
+                                     textfont=dict(size=15), outsidetextfont=dict(size=12, color='#1A252C'))
         fig_broker_usr = apply_bdi_theme(fig_broker_usr, legend_below=True)
         fig_broker_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         grafico(fig_broker_usr, 'Personas únicas por broker', 'asesores')
@@ -2533,7 +2585,8 @@ with tab_car:
             title="Personas Únicas Atendidas por Patrimonio",
             category_orders={'Segmento': TIERS}
         )
-        fig_tier_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
+        fig_tier_usr.update_traces(texttemplate='%{value}<br>%{percent}', textposition='auto',
+                                   textfont=dict(size=15), outsidetextfont=dict(size=12, color='#1A252C'))
         fig_tier_usr = apply_bdi_theme(fig_tier_usr, legend_below=True)
         fig_tier_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
         grafico(fig_tier_usr, 'Personas únicas por segmento patrimonial', 'asesores')
@@ -2793,6 +2846,19 @@ with tab_com:
                 showlegend=False, name='Etapa',
                 hovertemplate="%{y}<br>%{x} contactos<extra></extra>"
             )
+            # Los segmentos finos del último escalón se anotan afuera: en el PDF no
+            # existe el hover, así que la cifra tiene que estar escrita en la hoja.
+            acumulado_g = 0.0
+            anotar_fuera = []
+            for etiqueta, valor in [(DES_MEMBRESIA, n_membresia),
+                                    (DES_CONSULTORIA, n_consultoria),
+                                    (DES_DERIVADO, n_derivado)]:
+                if valor and valor / ancho_max < 0.06:
+                    anotar_fuera.append((etiqueta, valor,
+                                         espaciador[0] + acumulado_g + valor / 2))
+                acumulado_g += valor
+
+            anotados = {e for e, _, _ in anotar_fuera}
             for etiqueta, valor in [(DES_MEMBRESIA, n_membresia),
                                     (DES_CONSULTORIA, n_consultoria),
                                     (DES_DERIVADO, n_derivado)]:
@@ -2800,11 +2866,23 @@ with tab_com:
                 fig_emb.add_bar(
                     y=etiquetas_y, x=[valor, 0, 0], orientation='h', name=etiqueta,
                     marker=dict(color=DESENLACE_COLORS[etiqueta], line=dict(color='#FFFFFF', width=2)),
-                    text=[f"{corto}<br>{valor} · {_pct(valor, n_leads)}" if valor else '', '', ''],
-                    textposition='inside', insidetextanchor='middle',
+                    text=[f"{corto}<br>{valor} · {_pct(valor, n_leads)}"
+                          if (valor and etiqueta not in anotados) else '', '', ''],
+                    textposition='inside', insidetextanchor='middle', cliponaxis=False,
                     textfont=dict(color='#FFFFFF', size=15, family='Inter, Segoe UI, sans-serif'),
                     hovertemplate=f"<b>{etiqueta}</b><br>%{{x}} leads<extra></extra>"
                 )
+
+            for k, (etiqueta, valor, xpos) in enumerate(anotar_fuera):
+                fig_emb.add_annotation(
+                    x=xpos, y='3 · Leads ganados', xref='x', yref='y',
+                    text=f"<b>{etiqueta.split(' - ')[0].split(' a ')[0]}</b> {valor} · "
+                         f"{_pct(valor, n_leads)}",
+                    showarrow=True, arrowhead=2, arrowwidth=1.4,
+                    arrowcolor=DESENLACE_COLORS[etiqueta],
+                    ax=0, ay=42 + k * 26, font=dict(size=12, color='#1A252C'),
+                    bgcolor='rgba(255,255,255,0.93)', bordercolor=DESENLACE_COLORS[etiqueta],
+                    borderwidth=1, borderpad=3)
 
             fig_emb = apply_bdi_theme(fig_emb, legend_below=True)
             fig_emb.update_layout(
@@ -2815,21 +2893,21 @@ with tab_com:
                 yaxis=dict(tickfont=dict(color='#0F5132', size=16), showgrid=False,
                            categoryorder='array', categoryarray=etiquetas_y),
                 legend_title="Cómo se ganó",
-                uniformtext=dict(minsize=12, mode='hide'),
-                height=440, margin=dict(t=80, b=110, l=250, r=200)
+                uniformtext=dict(minsize=11, mode='show'),
+                height=470, margin=dict(t=80, b=150, l=250, r=200)
             )
             pendientes = n_leads - n_ganados
             # Las anotaciones van FUERA del área del gráfico (xref paper), con margen
             # derecho reservado: antes se escribían en coordenadas de dato y el texto
             # quedaba cortado contra el borde.
-            for fila, cantidad, texto, color in [
-                ('2 · Leads reales', n_cliente, 'ya eran clientes', '#8A6D00'),
-                ('3 · Leads ganados', pendientes, 'sin cerrar todavía', '#7A867F')]:
+            for fila, cantidad, texto, color, desp in [
+                ('2 · Leads reales', n_cliente, 'ya eran clientes', '#8A6D00', 8),
+                ('3 · Leads ganados', pendientes, 'sin cerrar todavía', '#7A867F', -8)]:
                 if cantidad:
                     fig_emb.add_annotation(
                         xref='paper', x=1.015, y=fila, xanchor='left', yanchor='middle',
-                        text=f"<b>−{cantidad}</b><br><span style='font-size:12px'>{texto}</span>",
-                        showarrow=False, align='left', font=dict(color=color, size=15))
+                        text=f"<b>−{cantidad}</b> {texto}", yshift=desp,
+                        showarrow=False, align='left', font=dict(color=color, size=14))
             grafico(fig_emb, 'Embudo comercial', 'comercial')
 
             k = st.columns(5)
@@ -2874,6 +2952,7 @@ with tab_com:
                           (DES_DERIVADO, n_derivado), (DES_NO_CALIFICA, no_califica),
                           (DES_EN_PROCESO, en_proceso), (DES_SIN_DEFINIR, sin_definir)]
             fig_con = go.Figure()
+            finos = {e for e, v in categorias if v and n_leads and v / n_leads < 0.05}
             for etiqueta, valor in categorias:
                 if not valor:
                     continue
@@ -2881,10 +2960,22 @@ with tab_com:
                 fig_con.add_bar(
                     y=['Leads reales'], x=[valor], orientation='h', name=etiqueta,
                     marker=dict(color=DESENLACE_COLORS[etiqueta], line=dict(color='#FFFFFF', width=2)),
-                    text=[f"{valor}<br>{pct:.0f}%"], textposition='inside', insidetextanchor='middle',
+                    text=[f"{valor}<br>{pct:.0f}%" if etiqueta not in finos else ''], textposition='inside', insidetextanchor='middle',
                     textfont=dict(color='#FFFFFF' if etiqueta != DES_SIN_DEFINIR else '#14382A', size=15),
                     hovertemplate=f"<b>{etiqueta}</b><br>%{{x}} leads ({pct:.1f}%)<extra></extra>"
                 )
+            acum_c = 0.0
+            for etiqueta, valor in categorias:
+                if valor and n_leads and valor / n_leads < 0.05:
+                    fig_con.add_annotation(
+                        x=acum_c + valor / 2, y='Leads reales', xref='x', yref='y',
+                        text=f"<b>{etiqueta}</b> {valor} · {valor/n_leads*100:.0f}%",
+                        showarrow=True, arrowhead=2, arrowwidth=1.4,
+                        arrowcolor=DESENLACE_COLORS[etiqueta], ax=0, ay=-42,
+                        font=dict(size=12, color='#1A252C'), bgcolor='rgba(255,255,255,0.93)',
+                        bordercolor=DESENLACE_COLORS[etiqueta], borderwidth=1, borderpad=3)
+                acum_c += valor
+
             fig_con = apply_bdi_theme(fig_con, legend_below=True)
             fig_con.update_layout(
                 title=dict(text="Desglose Completo de los Leads Reales",
@@ -2892,8 +2983,8 @@ with tab_com:
                 barmode='stack', bargap=0.6,
                 xaxis=dict(visible=False, range=[0, max(n_leads, 1) * 1.01]),
                 yaxis=dict(showticklabels=False, showgrid=False),
-                legend_title="Desenlace", uniformtext=dict(minsize=12, mode='hide'),
-                height=300, margin=dict(t=80, b=120, l=40, r=40)
+                legend_title="Desenlace", uniformtext=dict(minsize=11, mode='show'),
+                height=340, margin=dict(t=100, b=120, l=40, r=40)
             )
             grafico(fig_con, 'Conciliación de leads reales', 'comercial')
 
