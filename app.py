@@ -747,20 +747,23 @@ def dias_habiles_efectivos(serie_fechas):
 # -----------------------------------------------------------
 # ANÁLISIS DE CAPTACIÓN (líneas comerciales / top of funnel)
 # -----------------------------------------------------------
+# El tramo "Sin respuesta" se eliminó a propósito: una conversación que se acepta y se
+# resuelve sin contestar suele ser un "gracias" de la noche anterior, no una falla de
+# atención. Contarla como tal inflaba el indicador. El semáforo se calcula ahora sobre
+# las conversaciones que sí tuvieron respuesta, y la base se declara al pie.
 TRAMOS_FRT = [
     ('Menos de 5 min', 0, 5, '#0F5132'),
     ('5 a 15 min', 5, 15, '#2FA66B'),
     ('15 a 60 min', 15, 60, '#8FBF74'),
     ('Más de 60 min', 60, np.inf, '#C9A227'),
-    ('Sin respuesta', None, None, '#D6336C'),
 ]
 TRAMO_COLORS = {t[0]: t[3] for t in TRAMOS_FRT}
 ORDEN_TRAMOS = [t[0] for t in TRAMOS_FRT]
 
 def clasificar_tramo(frt):
     if pd.isna(frt):
-        return 'Sin respuesta'
-    for nombre, desde, hasta, _ in TRAMOS_FRT[:-1]:
+        return None
+    for nombre, desde, hasta, _ in TRAMOS_FRT:
         if desde <= frt < hasta:
             return nombre
     return 'Más de 60 min'
@@ -1109,20 +1112,24 @@ def fig_composicion_mensual(d, periodos_orden, top_n=5, para_pdf=False):
                           "<br>Peso del mes: %{customdata[0]:.1f}%<extra></extra>"
         )
 
-    # Lo que no entró adentro se dibuja al costado, con flecha a su porción.
-    # Se escalonan verticalmente para que dos etiquetas del mismo mes no se pisen.
+    # Lo que no entró adentro se lleva al espacio libre ARRIBA de su barra, apilado, con
+    # una flecha hasta la porción. Antes salía al costado y se superponía con la barra
+    # vecina y con otras etiquetas del mismo mes.
+    totales = comp.groupby('periodo')['Chats'].sum().to_dict()
     por_periodo = {}
     for p, asesor, c, pc, centro in sorted(fuera, key=lambda t: (t[0], -t[4])):
         n = por_periodo.get(p, 0)
         por_periodo[p] = n + 1
+        # Distancia en píxeles desde la porción hasta la zona despejada sobre la barra.
+        salto = (totales.get(p, 0) - centro) * px_por_chat + 26 + n * 27
         fig.add_annotation(
             x=p, y=centro, xref='x', yref='y',
             text=f"<b>{asesor}</b> {c} · {pc:.0f}%",
-            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.4,
+            showarrow=True, arrowhead=2, arrowsize=1, arrowwidth=1.3,
             arrowcolor=USER_COLORS.get(asesor, '#5B6E67'),
-            ax=52, ay=-30 - n * 26, xanchor='left',
+            ax=0, ay=-salto, xanchor='center',
             font=dict(size=12 if para_pdf else 11, color='#1A252C'),
-            bgcolor='rgba(255,255,255,0.92)',
+            bgcolor='rgba(255,255,255,0.94)',
             bordercolor=USER_COLORS.get(asesor, '#DDE5E1'), borderwidth=1, borderpad=3
         )
 
@@ -1132,6 +1139,7 @@ def fig_composicion_mensual(d, periodos_orden, top_n=5, para_pdf=False):
                    font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
         height=alto, xaxis_title="", yaxis_title="Conversaciones",
         xaxis=dict(tickangle=-25, tickfont=dict(size=14)),
+        yaxis=dict(range=[0, total_max * (1.30 if fuera else 1.06)]),
         uniformtext=dict(minsize=11, mode='show')
     )
     return fig
@@ -1158,10 +1166,11 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
         rows=filas, cols=cols,
         specs=[[{'type': 'domain'} for _ in range(cols)] for _ in range(filas)],
         subplot_titles=[f"{a} · {dd[dd['user'] == a][COL_ID].nunique():,} chats" for a in orden],
-        vertical_spacing=0.14, horizontal_spacing=0.04
+        vertical_spacing=0.17, horizontal_spacing=0.07
     )
     for i, asesor in enumerate(orden):
         g = dd[dd['user'] == asesor].groupby('tier')[COL_ID].nunique().reindex(TIERS).fillna(0)
+        g = g[g > 0]          # una porción de valor 0 no es información: imprimía "0 0%"
         fig.add_trace(go.Pie(
             labels=list(g.index), values=list(g.values), hole=0.38,
             marker=dict(colors=[TIER_COLORS[t] for t in g.index],
@@ -1170,7 +1179,7 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
             textfont=dict(size=16 if para_pdf else 12),
             insidetextorientation='horizontal',
             outsidetextfont=dict(size=14 if para_pdf else 11, color='#1A252C'),
-            sort=False, showlegend=(i == 0),
+            sort=False, showlegend=(i == 0), automargin=True,
             hovertemplate="<b>%{label}</b><br>%{value} chats (%{percent})<extra></extra>"
         ), row=i // cols + 1, col=i % cols + 1)
 
@@ -1334,8 +1343,9 @@ def figuras_asesores(d, linea, periodos_orden):
         items.append(_item("Reparto del volumen dentro del equipo, mes a mes",
                            "Cada barra es un mes completo, dividido por asesor. Los cinco de mayor "
                            "volumen de cada mes siempre muestran nombre, cantidad y porcentaje: cuando "
-                           "la porción es demasiado fina para escribir adentro, la etiqueta sale al "
-                           "costado con una flecha. Sirve para ver cómo se distribuye la carga y cómo "
+                           "la porción es demasiado fina para escribir adentro, la etiqueta se ubica "
+                           "arriba de la barra con una flecha hasta su porción. Sirve para ver cómo se "
+                           "distribuye la carga y cómo "
                            "evoluciona esa distribución a lo largo del año.", f, ratio=0.50, solo=True))
 
     # 5 · Rendimiento por asesor (tabla)
@@ -1353,11 +1363,13 @@ def figuras_asesores(d, linea, periodos_orden):
                               "indica casos puntuales que quedan sin seguimiento, no una demora general.",
                       'obj': tabla})
 
+        orden_p90 = mu.sort_values('FRT_p90', na_position='first')['user'].tolist()
         comp_p = mu.melt(id_vars='user', value_vars=['FRT_Mediano', 'FRT_p90'],
                          var_name='Métrica', value_name='Minutos')
         comp_p['Métrica'] = comp_p['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
         f = px.bar(comp_p, x='Minutos', y='user', color='Métrica', orientation='h', barmode='group',
                    color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
+                   category_orders={'user': orden_p90},
                    title="Velocidad de Respuesta en Minutos de Jornada: Mediana vs. p90")
         f.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False,
                         textfont=dict(size=13))
@@ -1374,6 +1386,7 @@ def figuras_asesores(d, linea, periodos_orden):
     tr = d['FRT_min'].apply(clasificar_tramo).value_counts().reindex(ORDEN_TRAMOS).fillna(0).reset_index()
     tr.columns = ['Tramo', 'Chats']
     total_tr = tr['Chats'].sum()
+    base_tr = int(d['FRT_min'].notna().sum())
     tr['Texto'] = tr.apply(lambda r: f"{int(r['Chats'])} ({r['Chats']/total_tr*100:.0f}%)" if total_tr else "", axis=1)
     f = px.bar(tr[::-1], x='Chats', y='Tramo', orientation='h', text='Texto', color='Tramo',
                color_discrete_map=TRAMO_COLORS, category_orders={'Tramo': ORDEN_TRAMOS[::-1]},
@@ -1382,9 +1395,10 @@ def figuras_asesores(d, linea, periodos_orden):
     _tema_pdf(f, 380, izq=170)
     f.update_layout(xaxis_title="Conversaciones", yaxis_title="")
     items.append(_item("Distribución del tiempo de primera respuesta",
-                       "La mediana resume, pero no muestra los extremos. Acá está la distribución "
-                       "completa en cinco tramos. El de más de 60 minutos es el relevante: son "
-                       "conversaciones en las que el cliente ya percibió una demora.", f, ratio=0.235))
+                       f"La mediana resume, pero no muestra los extremos. Acá está la distribución en "
+                       f"cuatro tramos sobre las {base_tr:,} conversaciones que tuvieron respuesta "
+                       "registrada. El tramo de más de 60 minutos es el relevante: son conversaciones "
+                       "en las que el cliente ya percibió una demora.", f, ratio=0.235))
 
     # 7 · Patrimonio por asesor
     fp = fig_patrimonio_por_asesor(d, para_pdf=True)
@@ -1405,10 +1419,12 @@ def figuras_asesores(d, linea, periodos_orden):
         f = px.pie(bu, values='Personas', names='Broker', hole=0.45, color='Broker',
                    color_discrete_map=BROKER_COLORS, title="Personas Únicas por Broker")
         f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='auto',
-                        textfont=dict(size=19), outsidetextfont=dict(size=15, color='#1A252C'),
-                        marker=dict(line=dict(color='#FFFFFF', width=2)))
+                        textfont=dict(size=19), outsidetextfont=dict(size=14, color='#1A252C'),
+                        marker=dict(line=dict(color='#FFFFFF', width=2)), automargin=True)
         _tema_pdf(f, 560, leyenda=True, izq=20, inf=130)
-        f.update_layout(legend=dict(font=dict(size=16)), margin=dict(t=64, b=130, l=20, r=20))
+        # Margen superior generoso: las etiquetas que salen afuera de la torta se
+        # escribían encima del título.
+        f.update_layout(legend=dict(font=dict(size=16)), margin=dict(t=96, b=130, l=40, r=40))
         items.append(_item("Con qué brokers opera la cartera",
                            "Personas distintas atendidas por broker, no cantidad de conversaciones: "
                            "evita que un cliente muy conversador distorsione el peso de su plataforma.",
@@ -1422,10 +1438,10 @@ def figuras_asesores(d, linea, periodos_orden):
                    color_discrete_map=TIER_COLORS, category_orders={'Segmento': TIERS},
                    title="Personas Únicas por Segmento Patrimonial")
         f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='auto',
-                        textfont=dict(size=19), outsidetextfont=dict(size=15, color='#1A252C'),
-                        marker=dict(line=dict(color='#FFFFFF', width=2)))
+                        textfont=dict(size=19), outsidetextfont=dict(size=14, color='#1A252C'),
+                        marker=dict(line=dict(color='#FFFFFF', width=2)), automargin=True)
         _tema_pdf(f, 560, leyenda=True, izq=20, inf=150)
-        f.update_layout(legend=dict(font=dict(size=15)), margin=dict(t=64, b=150, l=20, r=20))
+        f.update_layout(legend=dict(font=dict(size=15)), margin=dict(t=96, b=150, l=40, r=40))
         items.append(_item("Cómo se reparte el patrimonio de la base",
                            "Clientes distintos por tramo de monto declarado. Es el mapa de a quién se "
                            "está atendiendo, independiente de cuánto escriba cada uno.",
@@ -1436,8 +1452,10 @@ def figuras_asesores(d, linea, periodos_orden):
         fr = dexp.groupby('brokers').agg(Chats=(COL_ID, 'nunique'),
                                          Usuarios=('contactNumber', 'nunique')).reset_index()
         fr['Ratio'] = fr['Chats'] / fr['Usuarios']
-        f = px.bar(fr.sort_values('Ratio'), x='Ratio', y='brokers', orientation='h', text='Ratio',
+        fr = fr.sort_values('Ratio')          # ascendente: plotly apila de abajo hacia arriba
+        f = px.bar(fr, x='Ratio', y='brokers', orientation='h', text='Ratio',
                    color='brokers', color_discrete_map=BROKER_COLORS,
+                   category_orders={'brokers': fr['brokers'].tolist()},
                    title="Conversaciones por Cliente, según Broker")
         f.update_traces(texttemplate='%{text:.2f}', textposition='outside', cliponaxis=False,
                         textfont=dict(size=17))
@@ -1465,15 +1483,50 @@ def figuras_asesores(d, linea, periodos_orden):
                            "práctica, no del manual. Permite verificar si el orden de atención coincide "
                            "con el que la consultora se propuso.", f, ancho='medio', ratio=0.52))
 
-    # 10 · Top clientes
+    # 10 · Intensidad de uso por segmento patrimonial
+    if not dt.empty:
+        inten = dt.groupby('tier').agg(Chats=(COL_ID, 'nunique'),
+                                       Clientes=('contactNumber', 'nunique')).reset_index()
+        inten = inten[inten['Clientes'] > 0]
+        if not inten.empty:
+            inten['Ratio'] = inten['Chats'] / inten['Clientes']
+            inten['Texto'] = inten.apply(
+                lambda r: f"{r['Ratio']:.2f}  ·  {int(r['Clientes'])} clientes", axis=1)
+            promedio = inten['Chats'].sum() / inten['Clientes'].sum()
+            f = px.bar(inten, x='Ratio', y='tier', orientation='h', text='Texto', color='tier',
+                       color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+                       title="Conversaciones por Cliente Único, según Patrimonio")
+            f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=15))
+            f.add_vline(x=promedio, line_width=2, line_dash='dot', line_color='#C9A227',
+                        annotation_text=f"Promedio {promedio:.2f}", annotation_position='top right',
+                        annotation_font=dict(color='#8A6D00', size=13))
+            _tema_pdf(f, 400, izq=175)
+            f.update_layout(xaxis_title="Chats por cliente único", yaxis_title="",
+                            margin=dict(t=64, b=70, l=175, r=200))
+            f.update_yaxes(tickfont=dict(size=15))
+            items.append(_item("Cuánta atención consume cada segmento",
+                               "Conversaciones divididas por clientes únicos dentro de cada tramo de "
+                               "monto. Es intensidad de uso, no tamaño: un segmento chico puede "
+                               "demandar mucho más por cliente que uno grande. Junto al valor va la "
+                               "cantidad de clientes del tramo, para no sacar conclusiones de bases "
+                               "de pocos casos. La línea dorada es el promedio de la cartera etiquetada.",
+                               f, ratio=0.26))
+
+    # 11 · Top clientes
     top = d.groupby('contactName').agg(
         Chats=(COL_ID, 'nunique'),
         Asesor=('user', lambda x: x.mode()[0] if not x.mode().empty else '')).reset_index()
     top = top.sort_values('Chats', ascending=False).head(12).sort_values('Chats')
     if not top.empty:
         top['Nombre'] = _acortar(top['contactName'], 34)
+        # Con `color=` plotly crea una traza por asesor y el eje categórico respeta el
+        # orden dentro de cada traza, no el valor global: el ranking salía desordenado.
+        # Hay que fijar el orden del eje a mano.
+        orden_nombres = top.sort_values('Chats')['Nombre'].tolist()
         f = px.bar(top, x='Chats', y='Nombre', orientation='h', text='Chats', color='Asesor',
-                   color_discrete_map=USER_COLORS, title="Clientes con Mayor Volumen de Consultas")
+                   color_discrete_map=USER_COLORS,
+                   category_orders={'Nombre': orden_nombres},
+                   title="Clientes con Mayor Volumen de Consultas")
         f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=15))
         _tema_pdf(f, 620, leyenda=True, izq=300, inf=120)
         f.update_layout(xaxis_title="Conversaciones", yaxis_title="", bargap=0.35,
@@ -2444,74 +2497,6 @@ with tab_ase:
 # ---------------------------------------------------------
 
 
-    section_header("EFICIENCIA", "Desempeño Operativo por Asesor")
-
-    total_general_chats = df[COL_ID].nunique()
-    base_dias = dias_habiles_efectivos(df['createdAt_dt'])
-
-    st.caption(f"📅 **Base de cálculo:** {base_dias} días hábiles reales de los períodos seleccionados "
-               f"(sin fines de semana ni feriados AR, respetando meses incompletos) · Jornada {HORARIO_TXT} hs "
-               f"({HORAS_JORNADA:.0f} hs). Todos los tiempos de respuesta y resolución se miden solo dentro de esa ventana.")
-
-    df_user_eff = df.groupby('user').agg(
-        Total_Chats=(COL_ID, 'nunique'),
-        FRT_Mediano_Min=('FRT_min', 'median'),
-        Contactos_Nuevos=('isNewContact', 'sum')
-    ).reset_index()
-
-    df_user_eff['Participación (%)'] = (df_user_eff['Total_Chats'] / total_general_chats * 100) if total_general_chats > 0 else 0
-    df_user_eff['Contactos Nuevos (%)'] = (df_user_eff['Contactos_Nuevos'] / df_user_eff['Total_Chats'] * 100)
-    df_user_eff['Chats / Día'] = df_user_eff['Total_Chats'] / base_dias
-    df_user_eff['Chats / Hora (8hs)'] = df_user_eff['Chats / Día'] / HORAS_JORNADA
-
-    df_user_eff = df_user_eff.sort_values('Total_Chats', ascending=False)
-
-    df_table_eff = df_user_eff[['user', 'Total_Chats', 'Participación (%)', 'FRT_Mediano_Min',
-                                'Chats / Día', 'Chats / Hora (8hs)',
-                                'Contactos_Nuevos', 'Contactos Nuevos (%)']].copy()
-
-    df_table_eff.columns = ['Asesor', 'Total Chats', 'Participación (%)', 'FRT Mediano (Min)',
-                            'Chats / Día', 'Chats / Hora (8hs)', 'Nuevos Contactos (#)', 'Nuevos Contactos (%)']
-
-    st.markdown("##### Resumen por Asesor y Conexión")
-    st.caption("⚠️ Cada fila es un asesor **dentro de una línea**. Un mismo asesor rinde distinto "
-               "en cartera que en captación, y un promedio único de las dos esconde las dos cosas.")
-
-    df_mu = metricas_usuario_por_conexion(df)
-    if not df_mu.empty:
-        st.dataframe(
-            df_mu[['user', 'Conexión', 'Chats', '% de la Línea', 'Chats/Día', 'Contactos',
-                   'FRT_Mediano', 'FRT_p90', 'Resolucion_Mediana', 'Nuevos']].rename(columns={
-                       'user': 'Asesor', 'FRT_Mediano': 'FRT Mediano (min)', 'FRT_p90': 'FRT p90 (min)',
-                       'Resolucion_Mediana': 'Resolución Mediana (min)',
-                       'Nuevos': 'Contactos Nuevos'
-                   }).style.format({
-                       '% de la Línea': '{:.1f}%', 'Chats/Día': '{:.1f}',
-                       'FRT Mediano (min)': '{:.1f}', 'FRT p90 (min)': '{:.0f}',
-                       'Resolución Mediana (min)': '{:.0f}'
-                   }),
-            column_config={
-                "% de la Línea": st.column_config.NumberColumn(help="Peso del asesor DENTRO de esa conexión, no sobre el total general."),
-                "Chats/Día": st.column_config.NumberColumn(help="Sobre los días hábiles en que esa línea estuvo activa."),
-                "FRT p90 (min)": st.column_config.NumberColumn(help="La cola: el 10% de conversaciones peor atendidas."),
-            },
-            hide_index=True, **ANCHO
-        )
-
-    with st.expander("📊 Ver totales consolidados por asesor (todas las conexiones juntas)"):
-        st.caption("Útil para carga de trabajo global. Para evaluar desempeño, usá la tabla de arriba: "
-                   "los tiempos de una línea de captación y una de cartera no son comparables entre sí.")
-        st.dataframe(
-            df_table_eff.style.format({
-                'Participación (%)': '{:.1f}%', 'FRT Mediano (Min)': '{:.1f}',
-                'Chats / Día': '{:.1f}', 'Chats / Hora (8hs)': '{:.1f}',
-                'Nuevos Contactos (%)': '{:.1f}%'
-            }),
-            hide_index=True, **ANCHO
-        )
-
-    divider()
-
     section_header("COMPOSICIÓN MENSUAL", "Reparto de Chats por Asesor, Mes a Mes",
                    subtitle="Cada barra es un mes completo. La altura es el volumen; los colores, quién lo atendió.")
 
@@ -2529,7 +2514,7 @@ with tab_ase:
             "Asesores a etiquetar en cada mes:", 3, 8, 5, key="slider_top_mes",
             help="Los primeros de cada mes por volumen. Siempre muestran nombre, cantidad y "
                  "porcentaje: si la porción es muy finita para escribir adentro, la etiqueta "
-                 "sale al costado con una flecha. Ningún dato queda solo en el hover."
+                 "se ubica arriba de la barra con una flecha. Ningún dato queda solo en el hover."
         )
 
         fig_comp = fig_composicion_mensual(df_comp, periodos_disponibles, top_n=top_n)
@@ -2647,9 +2632,12 @@ with tab_car:
 
     df_top10 = df_clients_all.sort_values('Total_Chats', ascending=False).head(10).sort_values('Total_Chats', ascending=True)
 
+    # Igual que en el PDF: `color=` desarma el orden del eje si no se fija a mano.
+    orden_top10 = df_top10.sort_values('Total_Chats')['contactName'].tolist()
     fig_top10 = px.bar(
         df_top10, x='Total_Chats', y='contactName', orientation='h', text='Total_Chats',
         color='Asesor_Habitual', color_discrete_map=USER_COLORS,
+        category_orders={'contactName': orden_top10},
         title="Top 10 Clientes (Color = Asesor Principal)"
     )
     fig_top10.update_traces(textposition='outside', cliponaxis=False)
@@ -2763,6 +2751,38 @@ with tab_car:
     fig_comp_t.update_layout(xaxis_title="Minutos (Mediana)", yaxis_title="Segmento Patrimonial",
                              showlegend=False, height=460, margin=dict(t=70, b=55, l=170, r=120))
     grafico(fig_comp_t, 'SLA de facto por segmento patrimonial', 'asesores')
+
+    divider()
+
+    section_header(
+        "INTENSIDAD", "Conversaciones por Cliente según Segmento Patrimonial",
+        subtitle="Chats divididos clientes únicos dentro de cada tramo de monto. Dice cuánta "
+                 "atención consume en promedio un cliente de cada segmento, que no es lo mismo "
+                 "que cuántos clientes hay en él."
+    )
+    df_int = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier').agg(
+        Chats=(COL_ID, 'nunique'), Clientes=('contactNumber', 'nunique')).reset_index()
+    if not df_int.empty:
+        df_int['Ratio'] = df_int['Chats'] / df_int['Clientes']
+        df_int['Texto'] = df_int.apply(
+            lambda r: f"{r['Ratio']:.2f} chats · {int(r['Clientes'])} clientes", axis=1)
+        fig_int = px.bar(
+            df_int, x='Ratio', y='tier', orientation='h', text='Texto',
+            color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+            title="Conversaciones por Cliente Único, según Patrimonio"
+        )
+        fig_int.update_traces(textposition='outside', cliponaxis=False)
+        fig_int = add_reference_line(fig_int, df_int['Chats'].sum() / df_int['Clientes'].sum(),
+                                     orientation='v', label='Promedio general')
+        fig_int = apply_bdi_theme(fig_int)
+        fig_int.update_layout(showlegend=False, xaxis_title="Chats por cliente único",
+                              yaxis_title="Segmento Patrimonial", height=460,
+                              margin=dict(t=70, b=55, l=170, r=190))
+        grafico(fig_int, 'Conversaciones por cliente según patrimonio', 'asesores')
+        st.caption("🟡 La línea dorada marca el promedio de toda la cartera etiquetada. "
+                   "Un segmento por encima consume más atención por cliente que el promedio.")
+    else:
+        st.info("No hay segmentos patrimoniales etiquetados con los filtros actuales.")
 
     st.caption("🟡 La línea punteada dorada marca el promedio del grupo. Los tiempos usan **mediana**: "
                "unas pocas conversaciones que quedan abiertas varios días vuelven engañoso el promedio simple.")
