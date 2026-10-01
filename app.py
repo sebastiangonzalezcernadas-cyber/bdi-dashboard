@@ -1077,7 +1077,7 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
             marker=dict(colors=[TIER_COLORS[t] for t in g.index],
                         line=dict(color='#FFFFFF', width=2)),
             texttemplate='%{value}<br>%{percent}', textposition='inside',
-            textfont=dict(size=13 if para_pdf else 12, color='#FFFFFF'),
+            textfont=dict(size=16 if para_pdf else 12, color='#FFFFFF'),
             insidetextorientation='horizontal',
             sort=False, showlegend=(i == 0),
             hovertemplate="<b>%{label}</b><br>%{value} chats (%{percent})<extra></extra>"
@@ -1143,9 +1143,10 @@ def _tema_pdf(fig, alto, leyenda=False, izq=70, inf=70):
 def _acortar(serie, largo=26):
     return serie.astype(str).map(lambda t: t if len(t) <= largo else t[:largo - 1] + '…')
 
-def _item(titulo, desc, fig, ancho='full', ratio=0.34):
+def _item(titulo, desc, fig, ancho='full', ratio=0.34, solo=False):
+    """`solo=True` reserva una página entera para ese gráfico."""
     return {'tipo': 'fig', 'titulo': titulo, 'desc': desc, 'obj': fig,
-            'ancho': ancho, 'ratio': ratio}
+            'ancho': ancho, 'ratio': ratio, 'solo': solo}
 
 def figuras_asesores(d, linea, periodos_orden):
     """Todo el bloque de asesores, calculado sobre `d` (ya filtrado a esa línea)."""
@@ -1174,7 +1175,7 @@ def figuras_asesores(d, linea, periodos_orden):
     f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
     _tema_pdf(f, 400, inf=90)
     f.update_layout(xaxis_title="", yaxis_title="Conversaciones", xaxis=dict(tickangle=-25))
-    items.append(_item("Cuánto trabajo entra, mes a mes",
+    items.append(_item("Volumen de trabajo mes a mes",
                        "Conversaciones únicas iniciadas en cada mes. Es la medida de carga: cuánto "
                        "volumen tuvo que absorber el equipo. Compararlo contra la dotación del mes "
                        "muestra si el crecimiento se está acompañando con gente.", f, ratio=0.235))
@@ -1227,10 +1228,11 @@ def figuras_asesores(d, linea, periodos_orden):
                        tickfont=dict(color='#0F5132', size=15))
         f.update_layout(plot_bgcolor='#FBFDFC')
         pico = hc.loc[hc['Chats'].idxmax()]
-        items.append(_item("Los días y horas que más aprietan",
+        items.append(_item("Distribución de la demanda por día y hora",
                            f"Cruce de día de semana y hora. El pico del período fue {pico['dia_semana']} "
-                           f"a las {int(pico['hora']):02d}:00 con {int(pico['Chats'])} conversaciones. "
-                           "Las celdas más oscuras son las franjas que no pueden quedar descubiertas.",
+                           f"a las {int(pico['hora']):02d}:00, con {int(pico['Chats'])} conversaciones. "
+                           "Las celdas más intensas marcan las franjas de mayor concentración, que son "
+                           "las que conviene tener cubiertas.",
                            f, ratio=0.235))
 
     # 4 · Composición mensual por asesor
@@ -1251,13 +1253,15 @@ def figuras_asesores(d, linea, periodos_orden):
         f.update_layout(barmode='stack', bargap=0.18,
                         title=dict(text="Reparto de la Carga entre Asesores, Mes a Mes",
                                    font=dict(color='#0F5132', size=19), x=0.01))
-        _tema_pdf(f, 520, leyenda=True, inf=120)
-        f.update_layout(xaxis_title="", yaxis_title="Conversaciones", xaxis=dict(tickangle=-25))
-        items.append(_item("Quién sostiene el volumen cada mes",
-                           "Cada barra es el mes completo, partido por asesor, con cantidad y peso "
-                           "relativo. Las porciones sin número pesan menos del 7% y se omiten para que "
-                           "no se amontone el texto. Muestra si la carga se reparte o depende de una "
-                           "sola persona.", f, ratio=0.235))
+        _tema_pdf(f, 620, leyenda=True, inf=140)
+        f.update_layout(xaxis_title="", yaxis_title="Conversaciones",
+                        xaxis=dict(tickangle=-25, tickfont=dict(size=14)),
+                        legend=dict(font=dict(size=15)))
+        items.append(_item("Reparto del volumen dentro del equipo, mes a mes",
+                           "Cada barra es un mes completo, dividido por asesor, con cantidad y peso "
+                           "relativo. Las porciones que pesan menos del 7% van sin número para que el "
+                           "texto no se amontone. Sirve para ver cómo se distribuye la carga y cómo "
+                           "evoluciona esa distribución a lo largo del año.", f, ratio=0.50, solo=True))
 
     # 5 · Rendimiento por asesor (tabla)
     mu = metricas_usuario_linea(d)
@@ -1267,26 +1271,29 @@ def figuras_asesores(d, linea, periodos_orden):
             'user': 'Asesor', '% de la Línea': '% del total', 'Chats/Contacto': 'Chats/cliente',
             'FRT_Mediano': 'FRT med. (min)', 'FRT_p90': 'FRT p90 (min)',
             'Resolucion_Mediana': 'Resolución med. (min)'})
-        items.append({'tipo': 'tabla', 'titulo': "Rendimiento individual",
-                      'desc': "Volumen, ritmo diario y velocidad de cada asesor dentro de esta línea. "
-                              "La mediana dice cómo responde habitualmente; el p90, cuánto espera el "
-                              "10% peor atendido. Una mediana baja con p90 alto señala conversaciones "
-                              "que quedan dormidas, no lentitud general.", 'obj': tabla})
+        items.append({'tipo': 'tabla', 'titulo': "Detalle por asesor", 'solo': True,
+                      'desc': "Volumen, ritmo diario y tiempos de cada asesor dentro de esta línea. La "
+                              "mediana describe la respuesta habitual; el p90, el tiempo que espera el "
+                              "10% de conversaciones más demoradas. Una mediana baja junto a un p90 alto "
+                              "indica casos puntuales que quedan sin seguimiento, no una demora general.",
+                      'obj': tabla})
 
         comp_p = mu.melt(id_vars='user', value_vars=['FRT_Mediano', 'FRT_p90'],
                          var_name='Métrica', value_name='Minutos')
         comp_p['Métrica'] = comp_p['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
         f = px.bar(comp_p, x='Minutos', y='user', color='Métrica', orientation='h', barmode='group',
                    color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
-                   title="Velocidad de Respuesta: Habitual vs. Cola")
+                   title="Velocidad de Respuesta en Minutos de Jornada: Mediana vs. p90")
         f.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False,
                         textfont=dict(size=13))
-        _tema_pdf(f, 400, leyenda=True, izq=110, inf=110)
-        f.update_layout(xaxis_title="Minutos de jornada laboral", yaxis_title="")
-        items.append(_item("Quién contesta rápido y a quién se le acumula",
-                           "Dos barras por asesor: la mediana de su primera respuesta y su p90. Cuanto "
-                           "más separadas, más dispar es su atención. Medido en minutos de jornada, así "
-                           "que un chat de las 20:00 no penaliza a nadie.", f, ratio=0.235))
+        _tema_pdf(f, 400, leyenda=True, izq=120, inf=120)
+        f.update_layout(xaxis_title="", yaxis_title="", legend=dict(title=dict(text="")))
+        f.update_yaxes(tickfont=dict(size=15))
+        items.append(_item("Tiempo de respuesta habitual y cola, por asesor",
+                           "Dos barras por asesor: la mediana de la primera respuesta y el p90. La "
+                           "distancia entre ambas muestra cuán uniforme es la atención. Medido en "
+                           "minutos de jornada, de modo que un mensaje recibido a las 20:00 empieza a "
+                           "contar recién al día hábil siguiente.", f, ratio=0.235))
 
     # 6 · Semáforo
     tr = d['FRT_min'].apply(clasificar_tramo).value_counts().reindex(ORDEN_TRAMOS).fillna(0).reset_index()
@@ -1299,20 +1306,20 @@ def figuras_asesores(d, linea, periodos_orden):
     f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
     _tema_pdf(f, 380, izq=170)
     f.update_layout(xaxis_title="Conversaciones", yaxis_title="")
-    items.append(_item("Cuán rápido se contesta, en tramos",
-                       "La mediana esconde la cola, así que acá se ve la distribución completa. El tramo "
-                       "de más de 60 minutos es el que conviene mirar: son conversaciones que el cliente "
-                       "ya percibió como demora.", f, ratio=0.235))
+    items.append(_item("Distribución del tiempo de primera respuesta",
+                       "La mediana resume, pero no muestra los extremos. Acá está la distribución "
+                       "completa en cinco tramos. El de más de 60 minutos es el relevante: son "
+                       "conversaciones en las que el cliente ya percibió una demora.", f, ratio=0.235))
 
     # 7 · Patrimonio por asesor
     fp = fig_patrimonio_por_asesor(d, para_pdf=True)
     if fp is not None:
         fp.update_layout(margin=dict(t=80, b=80, l=40, r=40))
-        items.append(_item("Qué patrimonio atiende cada uno",
-                           "Una torta por asesor con la cantidad de chats y el peso de cada segmento "
-                           "dentro de su cartera. Permite ver quién concentra clientes grandes y quién "
-                           "absorbe volumen de tickets chicos, que es una carga distinta.",
-                           fp, ratio=fp.layout.height / 1400.0))
+        items.append(_item("Composición patrimonial de cada cartera",
+                           "Una torta por asesor con la cantidad de conversaciones y el peso de cada "
+                           "segmento dentro de su cartera. Atender patrimonios altos y atender volumen "
+                           "de tickets chicos son cargas de naturaleza distinta, y esto permite "
+                           "distinguirlas.", fp, ratio=fp.layout.height / 1350.0, solo=True))
 
     # 8 · Brokers y segmentos (tortas, media página cada una)
     dexp = d.explode('brokers')
@@ -1322,14 +1329,15 @@ def figuras_asesores(d, linea, periodos_orden):
         bu.columns = ['Broker', 'Personas']
         f = px.pie(bu, values='Personas', names='Broker', hole=0.45, color='Broker',
                    color_discrete_map=BROKER_COLORS, title="Personas Únicas por Broker")
-        f.update_traces(texttemplate='%{value}<br>%{percent}', textposition='inside',
-                        textfont=dict(size=14, color='#FFFFFF'),
+        f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='inside',
+                        textfont=dict(size=19, color='#FFFFFF'),
                         marker=dict(line=dict(color='#FFFFFF', width=2)))
-        _tema_pdf(f, 420, leyenda=True, izq=30, inf=90)
+        _tema_pdf(f, 560, leyenda=True, izq=20, inf=130)
+        f.update_layout(legend=dict(font=dict(size=16)), margin=dict(t=64, b=130, l=20, r=20))
         items.append(_item("Con qué brokers opera la cartera",
-                           "Personas distintas atendidas por broker, no cantidad de chats: evita que un "
-                           "cliente muy conversador distorsione el peso de su plataforma.",
-                           f, ancho='medio', ratio=0.52))
+                           "Personas distintas atendidas por broker, no cantidad de conversaciones: "
+                           "evita que un cliente muy conversador distorsione el peso de su plataforma.",
+                           f, ancho='medio', ratio=0.86))
 
     dt = d[d['tier'] != 'Sin Etiqueta Monto']
     if not dt.empty:
@@ -1338,14 +1346,15 @@ def figuras_asesores(d, linea, periodos_orden):
         f = px.pie(tu, values='Personas', names='Segmento', hole=0.45, color='Segmento',
                    color_discrete_map=TIER_COLORS, category_orders={'Segmento': TIERS},
                    title="Personas Únicas por Segmento Patrimonial")
-        f.update_traces(texttemplate='%{value}<br>%{percent}', textposition='inside',
-                        textfont=dict(size=14, color='#FFFFFF'),
+        f.update_traces(texttemplate='<b>%{value}</b><br>%{percent}', textposition='inside',
+                        textfont=dict(size=19, color='#FFFFFF'),
                         marker=dict(line=dict(color='#FFFFFF', width=2)))
-        _tema_pdf(f, 420, leyenda=True, izq=30, inf=110)
+        _tema_pdf(f, 560, leyenda=True, izq=20, inf=150)
+        f.update_layout(legend=dict(font=dict(size=15)), margin=dict(t=64, b=150, l=20, r=20))
         items.append(_item("Cómo se reparte el patrimonio de la base",
                            "Clientes distintos por tramo de monto declarado. Es el mapa de a quién se "
                            "está atendiendo, independiente de cuánto escriba cada uno.",
-                           f, ancho='medio', ratio=0.52))
+                           f, ancho='medio', ratio=0.86))
 
     # 9 · Fricción y SLA
     if not dexp.empty:
@@ -1356,14 +1365,15 @@ def figuras_asesores(d, linea, periodos_orden):
                    color='brokers', color_discrete_map=BROKER_COLORS,
                    title="Conversaciones por Cliente, según Broker")
         f.update_traces(texttemplate='%{text:.2f}', textposition='outside', cliponaxis=False,
-                        textfont=dict(size=14))
-        _tema_pdf(f, 360, izq=110)
+                        textfont=dict(size=17))
+        _tema_pdf(f, 360, izq=120)
+        f.update_xaxes(tickfont=dict(size=15)); f.update_yaxes(tickfont=dict(size=16))
         f.update_layout(xaxis_title="Chats por cliente único", yaxis_title="")
-        items.append(_item("Qué plataforma genera más consultas por cliente",
-                           "Chats divididos clientes únicos de cada broker. Un ratio alto significa que "
-                           "ese cliente vuelve más veces: suele indicar fricción operativa de la "
-                           "plataforma, y se ataca con instructivos o soporte, no con más asesores.",
-                           f, ancho='medio', ratio=0.52))
+        items.append(_item("Consultas por cliente según plataforma",
+                           "Conversaciones divididas por clientes únicos de cada broker. Un valor alto "
+                           "indica que el mismo cliente vuelve a escribir más veces, lo que suele "
+                           "responder a fricción operativa de esa plataforma y se trabaja con "
+                           "instructivos o soporte.", f, ancho='medio', ratio=0.52))
 
     if not dt.empty:
         sla = dt.groupby('tier')['FRT_min'].median().reindex(TIERS).dropna().reset_index()
@@ -1371,28 +1381,33 @@ def figuras_asesores(d, linea, periodos_orden):
                    color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
                    title="Tiempo de Respuesta según Patrimonio")
         f.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False,
-                        textfont=dict(size=14))
-        _tema_pdf(f, 360, izq=150)
+                        textfont=dict(size=17))
+        _tema_pdf(f, 360, izq=165)
+        f.update_xaxes(tickfont=dict(size=15)); f.update_yaxes(tickfont=dict(size=16))
         f.update_layout(xaxis_title="Minutos de jornada (mediana)", yaxis_title="")
-        items.append(_item("A quién se le contesta primero",
-                           "Mediana de primera respuesta por tramo de patrimonio. Es el SLA real, el que "
-                           "surge de la práctica y no del manual. Si los segmentos altos esperan más que "
-                           "los bajos, hay una prioridad invertida.", f, ancho='medio', ratio=0.52))
+        items.append(_item("Tiempo de respuesta según segmento patrimonial",
+                           "Mediana de primera respuesta por tramo de monto. Es el SLA que surge de la "
+                           "práctica, no del manual. Permite verificar si el orden de atención coincide "
+                           "con el que la consultora se propuso.", f, ancho='medio', ratio=0.52))
 
     # 10 · Top clientes
-    top = d.groupby('contactName')[COL_ID].nunique().reset_index(name='Chats')
+    top = d.groupby('contactName').agg(
+        Chats=(COL_ID, 'nunique'),
+        Asesor=('user', lambda x: x.mode()[0] if not x.mode().empty else '')).reset_index()
     top = top.sort_values('Chats', ascending=False).head(12).sort_values('Chats')
     if not top.empty:
-        top['Nombre'] = _acortar(top['contactName'], 30)
-        f = px.bar(top, x='Chats', y='Nombre', orientation='h', text='Chats',
-                   color_discrete_sequence=['#157347'], title="Clientes con Más Conversaciones")
-        f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
-        _tema_pdf(f, 460, izq=230)
-        f.update_layout(xaxis_title="Conversaciones", yaxis_title="")
-        items.append(_item("Los clientes que más demandan atención",
-                           "Top 12 por cantidad de conversaciones en el período. Útil para detectar "
-                           "cuentas que consumen tiempo desproporcionado respecto de lo que aportan, y "
-                           "para decidir si conviene un canal distinto para ellas.", f, ratio=0.235))
+        top['Nombre'] = _acortar(top['contactName'], 34)
+        f = px.bar(top, x='Chats', y='Nombre', orientation='h', text='Chats', color='Asesor',
+                   color_discrete_map=USER_COLORS, title="Clientes con Mayor Volumen de Consultas")
+        f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=15))
+        _tema_pdf(f, 620, leyenda=True, izq=300, inf=120)
+        f.update_layout(xaxis_title="Conversaciones", yaxis_title="", bargap=0.35,
+                        legend_title="Asesor habitual")
+        items.append(_item("Clientes con mayor volumen de consultas",
+                           "Los doce contactos con más conversaciones en el período, con el color del "
+                           "asesor que los atiende habitualmente. Sirve para dimensionar cuánto tiempo "
+                           "concentran unas pocas cuentas y evaluar si conviene otro canal para ellas.",
+                           f, ratio=0.36, solo=True))
 
     return items
 
@@ -1503,7 +1518,7 @@ def figuras_comercial(d, linea, df_historia):
     f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
     _tema_pdf(f, 380, izq=170)
     f.update_layout(xaxis_title="Leads", yaxis_title="")
-    items.append(_item("Cuánto espera un prospecto antes de que le contesten",
+    items.append(_item("Tiempo de respuesta a prospectos",
                        "En captación la velocidad pesa más que en cartera: el prospecto todavía no "
                        "tiene relación con nosotros y está comparando. Cada tramo que se corre hacia "
                        "abajo es conversión que se pierde sin dejar rastro.", f, ratio=0.235))
@@ -1514,8 +1529,10 @@ def figuras_comercial(d, linea, df_historia):
         f = px.bar(pd_, x='fecha', y='Leads', color='Desenlace', color_discrete_map=DESENLACE_COLORS,
                    category_orders={'Desenlace': DESENLACES}, title="Leads que Entran, Día por Día")
         _tema_pdf(f, 400, leyenda=True, inf=110)
-        f.update_layout(barmode='stack', xaxis_title="", yaxis_title="Leads")
-        items.append(_item("El ritmo diario de entrada",
+        f.update_layout(barmode='stack', xaxis_title="", yaxis_title="Leads",
+                        legend=dict(font=dict(size=15)))
+        f.update_xaxes(tickfont=dict(size=15)); f.update_yaxes(tickfont=dict(size=15))
+        items.append(_item("Entrada de leads día por día",
                            "Leads nuevos por día, coloreados por cómo terminaron. Sirve para ver si la "
                            "captación es pareja o depende de picos puntuales, y si los días de más "
                            "volumen son también los de peor cierre.", f, ancho='medio', ratio=0.52))
@@ -1528,14 +1545,15 @@ def figuras_comercial(d, linea, df_historia):
         f.add_bar(x=ph['hora_ingreso'], y=ph['Leads'], name='Leads que entran', marker_color='#8FBF74')
         f.add_scatter(x=ph['hora_ingreso'], y=ph['FRT'], name='Demora mediana (min)', yaxis='y2',
                       mode='lines+markers', line=dict(color='#C9A227', width=3), marker=dict(size=8))
-        f.update_layout(title=dict(text="Hora de Entrada vs. Demora en Responder",
+        f.update_layout(title=dict(text="Entrada de Leads y Demora, por Hora del Día",
                                    font=dict(color='#0F5132', size=19), x=0.01))
-        _tema_pdf(f, 400, leyenda=True, inf=110, izq=60)
-        f.update_layout(xaxis=dict(title="Hora del día", dtick=1),
+        _tema_pdf(f, 400, leyenda=True, inf=110, izq=70)
+        f.update_layout(legend=dict(font=dict(size=15)))
+        f.update_layout(xaxis=dict(title="", dtick=1, tickfont=dict(size=14)),
                         yaxis=dict(title="Leads"),
                         yaxis2=dict(title="Minutos", overlaying='y', side='right', showgrid=False,
                                     title_font=dict(color='#8A6D00'), tickfont=dict(color='#8A6D00')))
-        items.append(_item("Las ventanas horarias sin cobertura",
+        items.append(_item("Entrada y demora según hora del día",
                            "Barras: cuántos leads entran en cada hora. Línea dorada: cuánto tardan en "
                            "recibir respuesta. Donde la barra es alta y la línea también, hay demanda "
                            "llegando a una hora en la que nadie está mirando.", f, ancho='medio', ratio=0.52))
@@ -1555,11 +1573,11 @@ def figuras_comercial(d, linea, df_historia):
     pa['Ganados'] = pa['Membresias'] + pa['Consultorias'] + pa['Derivados']
     pa['% Conv.'] = np.where(pa['Leads'] > 0, pa['Ganados'] / pa['Leads'] * 100, np.nan)
     pa = pa.sort_values('Leads', ascending=False)
-    items.append({'tipo': 'tabla', 'titulo': "Rendimiento por asesor en la línea comercial",
-                  'desc': "Cuántos leads tomó cada uno, cuán rápido contestó y en qué terminaron. "
-                          "Una columna «Sin definir» alta no dice que ese asesor venda poco: dice que "
-                          "no está cerrando el registro, y hasta que lo haga su conversión no es "
-                          "comparable con la de los demás.",
+    items.append({'tipo': 'tabla', 'titulo': "Detalle por asesor en la línea comercial",
+                  'desc': "Leads tomados por cada asesor, tiempos de respuesta y desenlace. Una "
+                          "columna «Sin definir» alta no indica menos ventas, sino registro incompleto: "
+                          "mientras esa columna tenga peso, la conversión de esa fila es un piso y no "
+                          "un resultado comparable.",
                   'obj': pa[['Asesor', 'Leads', 'FRT_Mediano', 'FRT_p90', 'Membresias', 'Consultorias',
                              'Derivados', 'Ganados', '% Conv.', 'No_Califica', 'En_Proceso',
                              'Sin_Definir']].rename(columns={
@@ -1583,7 +1601,7 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
     from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Image,
-                                    Table, TableStyle, PageBreak, KeepTogether)
+                                    Table, TableStyle, PageBreak, KeepTogether, CondPageBreak)
 
     buf = io.BytesIO()
     W, H = landscape(A4)
@@ -1629,8 +1647,12 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
         c.restoreState()
 
     def img(item, ancho_pt):
+        # El lienzo se calcula PROPORCIONAL al ancho final en la hoja. Antes todo se
+        # renderizaba a 1450 px: un gráfico de media página se achicaba a la mitad y
+        # su tipografía terminaba imprimiéndose a 3,8 pt, ilegible.
         alto_pt = ancho_pt * item['ratio']
-        png = _fig_a_png(item['obj'], 1450, 1450 * item['ratio'])
+        lienzo = ancho_pt * 1.9
+        png = _fig_a_png(item['obj'], lienzo, lienzo * item['ratio'])
         return Image(io.BytesIO(png), width=ancho_pt, height=alto_pt)
 
     def partes(item, ancho_pt):
@@ -1687,30 +1709,29 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
         t.setStyle(TableStyle(estilo))
         return t
 
-    # ---- Paginado explícito.
-    # Se estima el alto de cada elemento y se corta de página cuando no entra, en vez
-    # de delegar en KeepTogether, que es conservador y dejaba medias hojas vacías.
+    # ---- Paginado.
+    # Antes del elemento se inserta un CondPageBreak con su alto estimado: reportlab
+    # salta de hoja solo si realmente no entra. Llevar la cuenta a mano generaba
+    # páginas en blanco cuando la estimación y el alto real no coincidían.
     FRAME = H - doc.topMargin - doc.bottomMargin
-    ALTO_TITULO, ALTO_DESC, ALTO_BANDA = 17, 34, 36
+    ALTO_TITULO, ALTO_DESC, ALTO_BANDA = 17, 40, 36
 
     hist = [Paragraph(titulo, H1), Paragraph(subtitulo, SUB)]
-    restante = FRAME - 74                      # lo que ocupa la portada
 
     def alto_de(item, ancho_pt):
         if item['tipo'] == 'kpis':
             cols_kpi = 6 if len(item['obj']) > 8 else 4
             return ALTO_TITULO + ALTO_DESC + int(np.ceil(len(item['obj']) / cols_kpi)) * 35 + 12
         if item['tipo'] == 'tabla':
-            return ALTO_TITULO + ALTO_DESC + (len(item['obj']) + 1) * 22 + 12
-        return ALTO_TITULO + ALTO_DESC + ancho_pt * item['ratio'] + 10
+            return ALTO_TITULO + ALTO_DESC + (len(item['obj']) + 1) * 23 + 14
+        return ALTO_TITULO + ALTO_DESC + ancho_pt * item['ratio'] + 12
 
-    for nombre, items in bloques:
+    for bi, (nombre, items) in enumerate(bloques):
         if not items:
             continue
-        if restante < ALTO_BANDA + 120:
-            hist.append(PageBreak()); restante = FRAME
+        if bi > 0:
+            hist.append(PageBreak())
         hist += [banda(nombre), Spacer(1, 10)]
-        restante -= ALTO_BANDA + 10
 
         i = 0
         while i < len(items):
@@ -1721,9 +1742,8 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
             h = alto_de(it, ancho_pt)
             if empareja:
                 h = max(h, alto_de(items[i + 1], medio))
-
-            if h > restante and restante < FRAME - 5:
-                hist.append(PageBreak()); restante = FRAME
+            # Un elemento marcado `solo` pide casi toda la hoja, así queda destacado.
+            hist.append(CondPageBreak(min(FRAME - 6, h + 30 if it.get('solo') else h)))
 
             if it['tipo'] == 'kpis':
                 hist += [Paragraph(it['titulo'], TIT), Paragraph(it['desc'], DESC),
@@ -1740,14 +1760,11 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
                                          ('RIGHTPADDING', (1, 0), (1, 0), 0),
                                          ('TOPPADDING', (0, 0), (-1, -1), 0),
                                          ('BOTTOMPADDING', (0, 0), (-1, -1), 0)]))
-                hist += [par, Spacer(1, 8)]
+                hist += [par, Spacer(1, 10)]
             else:
-                hist += partes(it, util) + [Spacer(1, 8)]
+                hist += partes(it, util) + [Spacer(1, 10)]
 
-            restante -= h
             i += 2 if empareja else 1
-        hist.append(PageBreak())
-        restante = FRAME
 
     while hist and isinstance(hist[-1], PageBreak):
         hist.pop()
