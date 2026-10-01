@@ -238,6 +238,7 @@ DESENLACE_COLORS = {
 }
 COLOR_ETAPA_1 = '#157347'
 COLOR_ETAPA_2 = '#5FBB8C'
+COLOR_ETAPA_3 = '#2FA66B'
 
 def normalizar_tag(texto):
     """'Membresía - Comercial' → 'membresiacomercial'. Inmune a acentos, guiones y espacios."""
@@ -1244,21 +1245,18 @@ kpi10.metric("Conexiones Activas", f"{df['conexion'].nunique()}",
 
 st.write("")
 
-tab1, tab_con, tab_cap, tab_pri, tab2, tab3, tab4, tab5 = st.tabs([
-    "📅  Evolución y Temporalidad",
-    "📞  Conexiones",
-    "🎯  Captación Comercial",
-    "🏦  Línea Principal",
-    "💼  Brokers y Patrimonio",
-    "👥  Clientes",
-    "🧑‍💼  Actividad por Usuario",
-    "🧩  Fricción y Complejidad"
+tab_pan, tab_ase, tab_car, tab_com = st.tabs([
+    "📊  Panorama",
+    "🧑‍💼  Asesores · Capacidad y Eficiencia",
+    "💼  Cartera y Clientes",
+    "🎯  Comercial · Embudo de Ventas"
 ])
 
 # ---------------------------------------------------------
-# TAB 1: EVOLUCIÓN Y TEMPORALIDAD
+# PANORAMA: volumen, horarios y comparativa de conexiones
 # ---------------------------------------------------------
-with tab1:
+with tab_pan:
+
     section_header("VOLUMEN", "Evolución de Chats en el Tiempo")
     if df['conexion'].nunique() > 1:
         df_mes = df.groupby(['periodo', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
@@ -1282,103 +1280,7 @@ with tab1:
                           margin=dict(t=70, b=95, l=70, r=50))
     st.plotly_chart(fig_mes, **ANCHO)
 
-    if df['conexion'].nunique() > 1:
-        df_dias = (df[df['dia_semana'].isin(DAY_ORDER_LABORAL)]
-                   .groupby(['dia_semana', 'conexion'])[COL_ID].nunique().reset_index(name='Chats'))
-        fig_dias = px.bar(
-            df_dias, x='dia_semana', y='Chats', text='Chats', color='conexion',
-            color_discrete_map=CONEXION_COLORS,
-            category_orders={'dia_semana': DAY_ORDER_LABORAL},
-            title="Distribución de Chats por Día (total apilado por conexión)"
-        )
-        fig_dias.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14), insidetextanchor='middle')
-        fig_dias = apply_bdi_theme(fig_dias, legend_below=True)
-        fig_dias.update_layout(barmode='stack')
-    else:
-        df_dias = df['dia_semana'].value_counts().reindex(DAY_ORDER_LABORAL).fillna(0).reset_index()
-        df_dias.columns = ['Día', 'Chats']
-        fig_dias = px.bar(
-            df_dias, x='Día', y='Chats', text='Chats',
-            color_discrete_sequence=['#2FA66B'], title="Distribución de Chats (Lunes a Viernes)"
-        )
-        fig_dias.update_traces(textposition='outside')
-        fig_dias = apply_bdi_theme(fig_dias)
-    fig_dias.update_layout(xaxis_title="Día", yaxis_title="Cantidad de Chats", legend_title="Conexión",
-                           height=420)
-    st.plotly_chart(fig_dias, **ANCHO)
-
-    if df['fecha_corta'].notna().any():
-        varias_conexiones = df['conexion'].nunique() > 1
-        if varias_conexiones:
-            df_diario = df.groupby(['fecha_corta', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-            fig_diario = px.area(
-                df_diario, x='fecha_corta', y='Chats', color='conexion',
-                color_discrete_map=CONEXION_COLORS,
-                title="Serie Diaria de Conversaciones (apilada por conexión)"
-            )
-            fig_diario.update_traces(line=dict(width=1.5))
-            fig_diario = apply_bdi_theme(fig_diario, legend_below=True)
-            fig_diario.update_layout(legend_title="Conexión")
-        else:
-            df_diario = df.groupby('fecha_corta')[COL_ID].nunique().reset_index(name='Chats')
-            fig_diario = px.line(
-                df_diario, x='fecha_corta', y='Chats',
-                color_discrete_sequence=['#0F5132'], title="Serie Diaria de Conversaciones"
-            )
-            fig_diario.update_traces(line=dict(width=2))
-            fig_diario = add_reference_line(fig_diario, df_diario['Chats'].mean(), orientation='h', label='Promedio diario')
-            fig_diario = apply_bdi_theme(fig_diario)
-        fig_diario.update_layout(xaxis_title="Fecha", yaxis_title="Conversaciones", height=340)
-        st.plotly_chart(fig_diario, **ANCHO)
-
-    section_header("REPARTO", "Peso de Cada Conexión en el Total")
-    col_d1, col_d2 = st.columns([2, 3])
-    with col_d1:
-        rep = df.groupby('conexion')[COL_ID].nunique().reset_index(name='Chats')
-        fig_rep = px.pie(
-            rep, values='Chats', names='conexion', hole=0.5,
-            color='conexion', color_discrete_map=CONEXION_COLORS,
-            title="Chats Totales por Conexión"
-        )
-        fig_rep.update_traces(textinfo='percent+value', textposition='inside', textfont=dict(size=16))
-        fig_rep = apply_bdi_theme(fig_rep, legend_below=True)
-        fig_rep.update_layout(margin=dict(t=60, b=80, l=30, r=30), height=380)
-        st.plotly_chart(fig_rep, **ANCHO)
-    with col_d2:
-        rep_u = df.groupby(['conexion', 'user'])[COL_ID].nunique().reset_index(name='Chats')
-        fig_repu = px.bar(
-            rep_u, x='conexion', y='Chats', color='user', text='Chats',
-            color_discrete_map=USER_COLORS, title="Composición de Cada Conexión por Asesor"
-        )
-        fig_repu.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14), insidetextanchor='middle')
-        fig_repu = apply_bdi_theme(fig_repu, legend_below=True)
-        fig_repu.update_layout(barmode='stack', xaxis_title="", yaxis_title="Conversaciones",
-                               legend_title="Asesor", height=380)
-        st.plotly_chart(fig_repu, **ANCHO)
-
-    section_header("CARGA HORARIA", "Distribución de Consultas por Hora")
-    if df['conexion'].nunique() > 1:
-        df_hora = df.groupby(['hora', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-        fig_hora = px.area(
-            df_hora, x='hora', y='Chats', color='conexion', markers=True,
-            color_discrete_map=CONEXION_COLORS,
-            title="Carga Horaria General (total apilado por conexión, 0 a 23 hs)"
-        )
-        fig_hora.update_traces(marker=dict(size=6))
-        fig_hora = apply_bdi_theme(fig_hora, legend_below=True)
-    else:
-        df_hora = df.groupby('hora')[COL_ID].nunique().reset_index(name='Chats')
-        fig_hora = px.area(
-            df_hora, x='hora', y='Chats', markers=True,
-            color_discrete_sequence=['#3AAFB9'], title="Carga Horaria General (Franja de 0 a 23 hs)"
-        )
-        fig_hora.update_traces(marker=dict(size=8, color='#0F5132'),
-                               fillcolor='rgba(58,175,185,0.15)', line=dict(color='#0F5132'))
-        fig_hora = apply_bdi_theme(fig_hora)
-    fig_hora.update_layout(xaxis_title="Hora del día", yaxis_title="Cantidad de Chats",
-                           xaxis=dict(dtick=1), legend_title="Conexión")
-    st.plotly_chart(fig_hora, **ANCHO)
-
+    section_header("CARGA HORARIA", "Distribución de Consultas dentro de la Jornada")
     df_h30_base = df[(df['hora'] >= HORA_GRAF_INI) & (df['hora'] <= HORA_GRAF_FIN)]
     if df['conexion'].nunique() > 1:
         df_hora_30 = df_h30_base.groupby(['hora_30m', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
@@ -1483,7 +1385,8 @@ with tab1:
 # ---------------------------------------------------------
 # TAB CONEXIONES: COMPARATIVA ENTRE LÍNEAS DE WHATSAPP
 # ---------------------------------------------------------
-with tab_con:
+
+
     res_con = resumen_por_conexion(df)
 
     if len(res_con) < 2:
@@ -1562,476 +1465,15 @@ with tab_con:
 
     divider()
 
-    col_cc1, col_cc2 = st.columns(2)
-    with col_cc1:
-        fig_nuevos = px.bar(
-            res_con, x='Conexión', y='% Nuevos', text='% Nuevos',
-            color='Conexión', color_discrete_map=CONEXION_COLORS,
-            title="Captación: % de Contactos Nuevos"
-        )
-        fig_nuevos.update_traces(texttemplate='%{text:.1f}%', textposition='outside', cliponaxis=False)
-        fig_nuevos = apply_bdi_theme(fig_nuevos)
-        fig_nuevos.update_layout(showlegend=False, xaxis_title="", yaxis_title="% de conversaciones")
-        st.plotly_chart(fig_nuevos, **ANCHO)
-    with col_cc2:
-        fig_frtc = px.bar(
-            res_con, x='Conexión', y='FRT Mediano', text='FRT Mediano',
-            color='Conexión', color_discrete_map=CONEXION_COLORS,
-            title="Agilidad: FRT Mediano por Conexión (min)"
-        )
-        fig_frtc.update_traces(texttemplate='%{text:.0f} min', textposition='outside', cliponaxis=False)
-        fig_frtc = apply_bdi_theme(fig_frtc)
-        fig_frtc.update_layout(showlegend=False, xaxis_title="", yaxis_title="Minutos (mediana)")
-        st.plotly_chart(fig_frtc, **ANCHO)
-
-    divider()
-
-
 # ---------------------------------------------------------
 # TAB CAPTACIÓN: EMBUDO DE LA LÍNEA COMERCIAL
 # ---------------------------------------------------------
-with tab_cap:
-    lineas = list(df['conexion'].dropna().unique())
-    if not lineas:
-        st.info("No hay conexiones en la selección actual.")
-    else:
-        sugerida = detectar_linea_captacion(df)
-        idx = lineas.index(sugerida) if sugerida in lineas else 0
-        linea_cap = st.selectbox(
-            "Línea de captación a analizar:", lineas, index=idx,
-            help="Por defecto se propone la línea con mayor proporción de contactos nuevos. "
-                 "Si mañana sumás otra línea comercial, aparece acá sola."
-        )
-
-        df_cap = df[df['conexion'] == linea_cap]
-        leads = analizar_captacion(df_cap, df_raw, linea_cap)
-
-        if leads.empty:
-            st.info(f"No hay conversaciones de **{linea_cap}** en la selección actual.")
-        else:
-            total_leads = len(leads)
-            clientes_existentes = leads[leads['Desenlace'] == DES_CLIENTE]
-            ya_era_cliente = leads[(leads['Estado'] == 'Ya era cliente') &
-                                   (leads['Desenlace'] != DES_CLIENTE)]
-            # Lead = contacto nuevo de verdad. Un cliente que ya tenía membresía o consultoría
-            # y escribe por una consulta no es captación: contarlo distorsiona numerador
-            # y denominador a la vez.
-            nuevos = leads[(leads['Estado'] != 'Ya era cliente') &
-                           (leads['Desenlace'] != DES_CLIENTE)]
-            n_nuevos = len(nuevos)
-            respondidos = int(nuevos['Respondido'].sum())
-            rapidos = int((nuevos['FRT_min'] < 15).sum())
-
-            n_membresia = int((nuevos['Desenlace'] == DES_MEMBRESIA).sum())
-            n_consultoria = int((nuevos['Desenlace'] == DES_CONSULTORIA).sum())
-            n_derivado = int((nuevos['Desenlace'] == DES_DERIVADO).sum())
-            no_califica = int((nuevos['Desenlace'] == DES_NO_CALIFICA).sum())
-            sin_definir = int((nuevos['Desenlace'] == DES_SIN_DEFINIR).sum())
-
-            n_aplican = n_nuevos - no_califica
-            n_ganados = n_membresia + n_consultoria + n_derivado
-            conversion = n_ganados / n_aplican * 100 if n_aplican else np.nan
-
-            section_header("EMBUDO", f"Recorrido del Lead en {linea_cap}",
-                           subtitle="La unidad es el contacto único, no la conversación. Los clientes que "
-                                    "ya tenían membresía o consultoría quedan fuera: escriben por una "
-                                    "consulta, no son captación.")
-
-            # ---- Embudo de tres niveles, centrado.
-            # Cada fila se dibuja como una barra apilada con un espaciador transparente
-            # a la izquierda, de ancho (máximo - total de la fila) / 2. Eso centra cada
-            # etapa y produce la silueta de embudo sin salir de go.Bar, que permite
-            # segmentar el último nivel en tres colores dentro de la misma fila.
-            etiquetas_y = ['3 · Leads ganados', '2 · Leads que aplican', '1 · Leads que escribieron']
-            ancho_max = max(n_nuevos, 1)
-
-            def _pct(v, base):
-                return f"{v / base * 100:.0f}%" if base else "s/d"
-
-            espaciador = [(ancho_max - n_ganados) / 2, (ancho_max - n_aplican) / 2, 0]
-            fig_emb = go.Figure()
-            fig_emb.add_bar(
-                y=etiquetas_y, x=espaciador, orientation='h',
-                marker=dict(color='rgba(0,0,0,0)'), showlegend=False,
-                hoverinfo='skip', name=''
-            )
-            # Niveles 1 y 2: una sola barra cada uno.
-            fig_emb.add_bar(
-                y=etiquetas_y, x=[0, n_aplican, n_nuevos], orientation='h',
-                marker=dict(color=['rgba(0,0,0,0)', COLOR_ETAPA_2, COLOR_ETAPA_1],
-                            line=dict(color='#FFFFFF', width=2)),
-                text=['', f"{n_aplican} leads · {_pct(n_aplican, n_nuevos)} de los que escribieron",
-                      f"{n_nuevos} leads"],
-                textposition='inside', insidetextanchor='middle',
-                textfont=dict(color='#FFFFFF', size=17, family='Inter, Segoe UI, sans-serif'),
-                showlegend=False, name='Etapa',
-                hovertemplate="%{y}<br>%{x} leads<extra></extra>"
-            )
-            # Nivel 3: un trace por categoría ganada, para que queden segmentadas por color.
-            for etiqueta, valor in [(DES_MEMBRESIA, n_membresia),
-                                    (DES_CONSULTORIA, n_consultoria),
-                                    (DES_DERIVADO, n_derivado)]:
-                texto = (f"{etiqueta.split(' - ')[0].split(' a ')[0]}<br>{valor} · {_pct(valor, n_aplican)}"
-                         if valor else '')
-                fig_emb.add_bar(
-                    y=etiquetas_y, x=[valor, 0, 0], orientation='h', name=etiqueta,
-                    marker=dict(color=DESENLACE_COLORS[etiqueta], line=dict(color='#FFFFFF', width=2)),
-                    text=[texto, '', ''], textposition='inside', insidetextanchor='middle',
-                    textfont=dict(color='#FFFFFF', size=15, family='Inter, Segoe UI, sans-serif'),
-                    hovertemplate=f"<b>{etiqueta}</b><br>%{{x}} leads<extra></extra>"
-                )
-
-            fig_emb = apply_bdi_theme(fig_emb, legend_below=True)
-            fig_emb.update_layout(
-                title=dict(text=f"Embudo de Captación · {linea_cap}",
-                           font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
-                barmode='stack', bargap=0.35,
-                xaxis=dict(visible=False, range=[0, ancho_max * 1.02]),
-                yaxis=dict(tickfont=dict(color='#0F5132', size=15), showgrid=False,
-                           categoryorder='array', categoryarray=etiquetas_y),
-                legend_title="Desenlace ganado",
-                uniformtext=dict(minsize=12, mode='hide'),
-                height=430, margin=dict(t=80, b=110, l=210, r=70)
-            )
-            # Las pérdidas de cada escalón, anotadas a la derecha de su fila.
-            if no_califica:
-                fig_emb.add_annotation(
-                    x=ancho_max, y='2 · Leads que aplican', xanchor='left', yanchor='middle',
-                    text=f"<b>−{no_califica}</b> no califica", showarrow=False, xshift=12,
-                    font=dict(color='#D6336C', size=14))
-            if sin_definir:
-                fig_emb.add_annotation(
-                    x=ancho_max, y='3 · Leads ganados', xanchor='left', yanchor='middle',
-                    text=f"<b>−{sin_definir}</b> sin definir", showarrow=False, xshift=12,
-                    font=dict(color='#7A867F', size=14))
-            st.plotly_chart(fig_emb, **ANCHO)
-
-            k = st.columns(5)
-            k[0].metric("Leads que Escribieron", f"{n_nuevos:,}",
-                        help="Contactos únicos nuevos. Excluye clientes existentes y a quienes ya "
-                             "conversaban con la mesa de asesores.")
-            k[1].metric("Leads que Aplican", f"{n_aplican:,}",
-                        delta=f"−{no_califica} no califica" if no_califica else None,
-                        delta_color="off",
-                        help="Los que escribieron menos los etiquetados «No califica».")
-            k[2].metric("Leads Ganados", f"{n_ganados:,}",
-                        help="Membresía + consultoría + derivados a un asesor.")
-            k[3].metric("Tasa de Conversión", f"{conversion:.1f}%" if pd.notna(conversion) else "s/d",
-                        help="Ganados sobre leads que aplican. Es un piso mientras queden leads sin definir.")
-            k[4].metric("Sin Definir", f"{sin_definir:,}",
-                        delta=f"{sin_definir/n_nuevos*100:.0f}% del total" if n_nuevos else None,
-                        delta_color="off",
-                        help="Sin etiqueta, o con cualquier etiqueta que no sea una de las cuatro de cierre.")
-
-            k2 = st.columns(5)
-            k2[0].metric("Membresías", f"{n_membresia:,}", help="Etiqueta «Membresia - Comercial».")
-            k2[1].metric("Consultorías", f"{n_consultoria:,}", help="Etiqueta «Consultoria - Comercial».")
-            k2[2].metric("Derivados", f"{n_derivado:,}",
-                         help="Etiqueta de derivación, o el contacto aparece después conversando "
-                              "en la línea de asesores.")
-            k2[3].metric("Tasa de Respuesta", f"{respondidos/n_nuevos*100:.0f}%" if n_nuevos else "s/d",
-                         help="Leads que recibieron al menos una respuesta.")
-            k2[4].metric("FRT p90", f"{nuevos['FRT_min'].quantile(0.9):.0f} min" if nuevos['FRT_min'].notna().any() else "s/d",
-                         help="El 10% peor de los leads espera al menos esto, en minutos de jornada laboral.")
-
-            conv_sin_resp = int(df_cap['FRT_min'].isna().sum())
-            if conv_sin_resp > (n_nuevos - respondidos):
-                st.caption(f"⚠️ Ojo con la diferencia de unidades: **{n_nuevos - respondidos} lead(s) nunca "
-                           f"recibieron ninguna respuesta**, pero hubo **{conv_sin_resp} conversaciones sin "
-                           "responder**. La diferencia son personas ya contestadas alguna vez que volvieron "
-                           "a escribir y quedaron sin respuesta en ese segundo intento.")
-
-            partes = []
-            if len(clientes_existentes):
-                partes.append(f"**{len(clientes_existentes)} clientes que ya tenían membresía o consultoría** "
-                              "y escribieron por una consulta")
-            if len(ya_era_cliente):
-                partes.append(f"**{len(ya_era_cliente)} contactos que ya conversaban** con la línea de asesores")
-            if partes:
-                st.caption("ℹ️ Fuera del embudo: entraron además " + " y ".join(partes) +
-                           ". No son captación, pero miden cuánta carga de consulta absorbe el número "
-                           "comercial y si se está difundiendo donde no corresponde.")
-
-            ganados_clientes = int(leads[leads['Estado'] == 'Ya era cliente']['Desenlace']
-                                   .isin(DESENLACES_GANADOS).sum())
-            if ganados_clientes:
-                st.caption(f"💰 Además hubo **{ganados_clientes} cierre(s) sobre contactos que ya eran "
-                           "clientes** de la línea de asesores. Es upsell, no captación de leads nuevos, "
-                           "así que no entra en la tasa de conversión — pero la venta se hizo por este número.")
-
-            if n_ganados == 0 and n_nuevos:
-                st.info("Todavía no hay ningún lead con las etiquetas **«Membresia - Comercial»** o "
-                        "**«Consultoria - Comercial»**. El tablero ya las reconoce: en cuanto se carguen "
-                        "en Whaticket, el embudo se llena solo, sin tocar el código.", icon="🏷️")
-
-            divider()
-
-            section_header("DESENLACE", "En Qué Terminó Cada Lead",
-                           subtitle="Cuatro etiquetas de cierre: «Membresia - Comercial», «Consultoria - "
-                                    "Comercial», derivación a un asesor y «No califica». Las etiquetas sin "
-                                    "el sufijo «- Comercial» marcan a alguien que ya era cliente y quedan "
-                                    "fuera del embudo.")
-
-            conteo_des = (nuevos['Desenlace'].value_counts()
-                          .reindex(DESENLACES).dropna().reset_index())
-            conteo_des.columns = ['Desenlace', 'Leads']
-            conteo_des['Pct'] = conteo_des['Leads'] / n_nuevos * 100
-            conteo_des['Texto'] = conteo_des.apply(
-                lambda r: f"{int(r['Leads'])} ({r['Pct']:.0f}%)", axis=1)
-
-            fig_des = px.bar(
-                conteo_des[::-1], x='Leads', y='Desenlace', orientation='h', text='Texto',
-                color='Desenlace', color_discrete_map=DESENLACE_COLORS,
-                category_orders={'Desenlace': DESENLACES[::-1]},
-                title=f"Desenlace de los {n_nuevos} Leads (excluye clientes existentes)"
-            )
-            fig_des.update_traces(textposition='outside', cliponaxis=False)
-            fig_des = apply_bdi_theme(fig_des)
-            fig_des.update_layout(showlegend=False, xaxis_title="Leads", yaxis_title="",
-                                  height=420, margin=dict(t=70, b=55, l=200, r=120))
-            st.plotly_chart(fig_des, **ANCHO)
-
-            if n_nuevos and sin_definir / n_nuevos > 0.30:
-                st.warning(
-                    f"**{sin_definir} de {n_nuevos} leads ({sin_definir/n_nuevos*100:.0f}%) quedaron sin "
-                    "ninguna de las cuatro etiquetas de cierre.** La tasa de conversión de arriba es un "
-                    "piso, no el número real: si entre esos hubo cierres sin registrar, la conversión "
-                    "verdadera es más alta; si se perdieron, el problema está en el seguimiento. "
-                    "Mientras esa franja sea grande, el embudo no se puede leer con confianza.", icon="⚠️")
-
-            section_header("CIERRE POR ASESOR", "Quién Convierte",
-                           subtitle="Leads atendidos, membresías cerradas y cuánto queda sin clasificar.")
-            cierre = nuevos.groupby('Asesor').agg(
-                Leads=('contactNumber', 'nunique'),
-                Membresias=('Desenlace', lambda s: int((s == DES_MEMBRESIA).sum())),
-                Consultorias=('Desenlace', lambda s: int((s == DES_CONSULTORIA).sum())),
-                Derivados=('Desenlace', lambda s: int((s == DES_DERIVADO).sum())),
-                No_Califica=('Desenlace', lambda s: int((s == DES_NO_CALIFICA).sum())),
-                Sin_Definir=('Desenlace', lambda s: int((s == DES_SIN_DEFINIR).sum())),
-            ).reset_index()
-            cierre['Aplican'] = cierre['Leads'] - cierre['No_Califica']
-            cierre['Ganados'] = cierre['Membresias'] + cierre['Consultorias'] + cierre['Derivados']
-            cierre['% Conversión'] = np.where(cierre['Aplican'] > 0,
-                                              cierre['Ganados'] / cierre['Aplican'] * 100, np.nan)
-            cierre['% Sin Definir'] = cierre['Sin_Definir'] / cierre['Leads'] * 100
-            cierre = cierre.sort_values('Leads', ascending=False)
-
-            st.dataframe(
-                cierre[['Asesor', 'Leads', 'No_Califica', 'Aplican', 'Membresias', 'Consultorias',
-                        'Derivados', 'Ganados', '% Conversión', 'Sin_Definir', '% Sin Definir']].rename(
-                    columns={'Membresias': 'Membresías', 'Consultorias': 'Consultorías',
-                             'No_Califica': 'No Califica', 'Sin_Definir': 'Sin Definir'}).style.format({
-                    '% Conversión': '{:.1f}%', '% Sin Definir': '{:.0f}%'
-                }),
-                column_config={
-                    "Aplican": st.column_config.NumberColumn(help="Leads menos los etiquetados «No califica»."),
-                    "Ganados": st.column_config.NumberColumn(help="Membresías + consultorías + derivados."),
-                    "% Conversión": st.column_config.NumberColumn(help="Ganados sobre los leads que aplican."),
-                    "Sin Definir": st.column_config.NumberColumn(help="Leads que ese asesor no etiquetó con ninguna de las cuatro."),
-                },
-                hide_index=True, **ANCHO
-            )
-
-            fig_cie = px.bar(
-                nuevos.groupby(['Asesor', 'Desenlace']).size().reset_index(name='Leads'),
-                x='Leads', y='Asesor', color='Desenlace', orientation='h', text='Leads',
-                color_discrete_map=DESENLACE_COLORS, category_orders={'Desenlace': DESENLACES},
-                title="Composición de la Cartera de Leads por Asesor"
-            )
-            fig_cie.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14),
-                                  insidetextanchor='middle')
-            fig_cie = apply_bdi_theme(fig_cie, legend_below=True)
-            fig_cie.update_layout(barmode='stack', xaxis_title="Leads", yaxis_title="",
-                                  legend_title="Desenlace", height=420,
-                                  margin=dict(t=70, b=100, l=110, r=70))
-            st.plotly_chart(fig_cie, **ANCHO)
-
-            section_header("VELOCIDAD", "Cuánto Tarda en Contestarse un Lead",
-                           subtitle=f"Minutos de jornada laboral ({HORARIO_TXT} hs). En captación lo que "
-                                    "define el resultado es la cola, no el promedio.")
-            col_v1, col_v2 = st.columns([3, 2])
-            with col_v1:
-                tramos = (nuevos['Tramo'].value_counts()
-                          .reindex(ORDEN_TRAMOS).fillna(0).reset_index())
-                tramos.columns = ['Tramo', 'Leads']
-                tramos['Pct'] = tramos['Leads'] / n_nuevos * 100
-                tramos['Texto'] = tramos.apply(lambda r: f"{int(r['Leads'])} ({r['Pct']:.0f}%)", axis=1)
-                fig_tr = px.bar(
-                    tramos[::-1], x='Leads', y='Tramo', orientation='h', text='Texto',
-                    color='Tramo', color_discrete_map=TRAMO_COLORS,
-                    category_orders={'Tramo': ORDEN_TRAMOS[::-1]},
-                    title="Semáforo de Primera Respuesta"
-                )
-                fig_tr.update_traces(textposition='outside', cliponaxis=False)
-                fig_tr = apply_bdi_theme(fig_tr)
-                fig_tr.update_layout(showlegend=False, xaxis_title="Leads", yaxis_title="",
-                                     height=400, margin=dict(t=70, b=55, l=185, r=110))
-                st.plotly_chart(fig_tr, **ANCHO)
-            with col_v2:
-                dentro = nuevos[~nuevos['fuera_horario']]['FRT_min'].median()
-                fuera = nuevos[nuevos['fuera_horario']]['FRT_min'].median()
-                n_fuera = int(nuevos['fuera_horario'].sum())
-                st.markdown("##### Dentro vs. fuera de horario")
-                real_med = nuevos['FRT_real'].median()
-                st.metric("Espera real del lead (reloj de pared)",
-                          f"{real_med/60:.1f} hs" if pd.notna(real_med) else "s/d",
-                          help="Tiempo calendario que el lead percibe, sin descontar noches ni fines de "
-                               "semana. Las demás métricas usan minutos de jornada laboral.")
-                st.metric("Leads fuera de horario", f"{n_fuera:,}",
-                          help=f"Entraron fuera de la jornada de {HORARIO_TXT} hs, o un fin de semana o feriado.")
-                st.metric("FRT mediano dentro de horario", f"{dentro:.0f} min" if pd.notna(dentro) else "s/d")
-                st.metric("FRT mediano fuera de horario", f"{fuera:.0f} min" if pd.notna(fuera) else "s/d")
-                if pd.notna(dentro) and pd.notna(fuera) and fuera > dentro * 3:
-                    st.warning(f"Aun midiendo solo minutos de jornada, un lead que entra fuera de horario "
-                               f"espera **{fuera/dentro:.0f} veces más**. "
-                               "Un autorespondedor que fije expectativa y pida datos cuesta poco y tapa ese agujero.",
-                               icon="⚠️")
-
-            divider()
-
-            section_header("QUIÉN ATIENDE", "Rendimiento por Asesor en la Línea Comercial",
-                           subtitle="Volumen, cobertura y cola de espera. El p90 muestra al que contesta rápido "
-                                    "casi siempre pero deja algunos leads dormidos.")
-            por_asesor = nuevos.groupby('Asesor').agg(
-                Leads=('contactNumber', 'nunique'),
-                Respondidos=('Respondido', 'sum'),
-                FRT_Mediano=('FRT_min', 'median'),
-                FRT_p90=('FRT_min', lambda s: s.quantile(0.9)),
-                Derivados=('Estado', lambda s: (s == 'Derivado a asesores').sum())
-            ).reset_index()
-            por_asesor['Sin Responder'] = por_asesor['Leads'] - por_asesor['Respondidos']
-            por_asesor['% Respuesta'] = por_asesor['Respondidos'] / por_asesor['Leads'] * 100
-            por_asesor['% Derivación'] = por_asesor['Derivados'] / por_asesor['Leads'] * 100
-            por_asesor['% de la Línea'] = por_asesor['Leads'] / n_nuevos * 100
-            por_asesor = por_asesor.sort_values('Leads', ascending=False)
-
-            st.dataframe(
-                por_asesor[['Asesor', 'Leads', '% de la Línea', '% Respuesta', 'Sin Responder',
-                            'FRT_Mediano', 'FRT_p90', 'Derivados', '% Derivación']].style.format({
-                    '% de la Línea': '{:.0f}%', '% Respuesta': '{:.0f}%',
-                    'FRT_Mediano': '{:.0f}', 'FRT_p90': '{:.0f}', '% Derivación': '{:.0f}%'
-                }),
-                column_config={
-                    "FRT_Mediano": st.column_config.NumberColumn("FRT Mediano (min)"),
-                    "FRT_p90": st.column_config.NumberColumn("FRT p90 (min)",
-                        help="El 10% de leads peor atendidos esperó al menos esto."),
-                    "Sin Responder": st.column_config.NumberColumn(help="Leads que nunca recibieron respuesta de este asesor."),
-                },
-                hide_index=True, **ANCHO
-            )
-
-            if len(por_asesor) and por_asesor.iloc[0]['% de la Línea'] > 70:
-                top = por_asesor.iloc[0]
-                st.warning(f"**{top['Asesor']}** concentra el **{top['% de la Línea']:.0f}%** de los leads de esta línea. "
-                           "Si está en una reunión o de licencia, la captación se frena entera.", icon="⚠️")
-
-            fig_pa = px.bar(
-                por_asesor.sort_values('Leads'), x='Leads', y='Asesor', orientation='h', text='Leads',
-                color='Asesor', color_discrete_map=USER_COLORS, title="Leads Atendidos por Asesor"
-            )
-            fig_pa.update_traces(textposition='outside', cliponaxis=False)
-            fig_pa = apply_bdi_theme(fig_pa)
-            fig_pa.update_layout(showlegend=False, xaxis_title="Leads únicos", yaxis_title="", height=380,
-                                 margin=dict(t=70, b=55, l=110, r=90))
-            st.plotly_chart(fig_pa, **ANCHO)
-            comp = por_asesor.melt(id_vars='Asesor', value_vars=['FRT_Mediano', 'FRT_p90'],
-                                   var_name='Métrica', value_name='Minutos')
-            comp['Métrica'] = comp['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
-            fig_pp = px.bar(
-                comp, x='Minutos', y='Asesor', color='Métrica', orientation='h', barmode='group',
-                color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
-                title="Tiempo de Respuesta: Mediana vs. Cola"
-            )
-            fig_pp.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False)
-            fig_pp = apply_bdi_theme(fig_pp, legend_below=True)
-            fig_pp.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="", height=400,
-                                 margin=dict(t=70, b=90, l=110, r=90))
-            st.plotly_chart(fig_pp, **ANCHO)
-
-            divider()
-
-            section_header("FLUJO", "Entrada de Leads y Ventanas sin Cobertura")
-            col_f1, col_f2 = st.columns(2)
-            with col_f1:
-                por_dia = nuevos.groupby(['fecha', 'Desenlace']).size().reset_index(name='Leads')
-                fig_fd = px.bar(
-                    por_dia, x='fecha', y='Leads', color='Desenlace',
-                    color_discrete_map=DESENLACE_COLORS,
-                    category_orders={'Desenlace': DESENLACES},
-                    title="Leads por Día y Desenlace"
-                )
-                fig_fd = apply_bdi_theme(fig_fd, legend_below=True)
-                fig_fd.update_layout(barmode='stack', xaxis_title="Fecha", yaxis_title="Leads",
-                                     legend_title="", height=340)
-                st.plotly_chart(fig_fd, **ANCHO)
-            with col_f2:
-                por_hora = nuevos.groupby('hora_ingreso').agg(
-                    Leads=('contactNumber', 'count'), FRT=('FRT_min', 'median')).reset_index()
-                fig_fh = go.Figure()
-                fig_fh.add_bar(x=por_hora['hora_ingreso'], y=por_hora['Leads'], name='Leads que entran',
-                               marker_color='#8FBF74')
-                fig_fh.add_scatter(x=por_hora['hora_ingreso'], y=por_hora['FRT'], name='FRT mediano (min)',
-                                   yaxis='y2', mode='lines+markers',
-                                   line=dict(color='#C9A227', width=3), marker=dict(size=8))
-                fig_fh = apply_bdi_theme(fig_fh, legend_below=True)
-                fig_fh.update_layout(
-                    title=dict(text="Hora de Entrada vs. Demora en Responder", font=dict(color='#0F5132', size=17), x=0.01),
-                    xaxis=dict(title="Hora del día", dtick=1),
-                    yaxis=dict(title="Leads"),
-                    yaxis2=dict(title="Minutos", overlaying='y', side='right', showgrid=False,
-                                title_font=dict(color='#8A6D00'), tickfont=dict(color='#8A6D00')),
-                    height=340
-                )
-                st.plotly_chart(fig_fh, **ANCHO)
-            st.caption("💡 Las horas donde la barra es alta y la línea dorada también lo es son las ventanas "
-                       "a cubrir primero: ahí entra volumen y se responde tarde.")
-
-            divider()
-
-            section_header("DERIVACIÓN", "Leads que Llegaron a un Asesor")
-            derivados_df = nuevos[nuevos['Estado'] == 'Derivado a asesores']
-            if not derivados_df.empty:
-                cd1, cd2 = st.columns([2, 3])
-                with cd1:
-                    st.metric("Horas medianas hasta la derivación",
-                              f"{derivados_df['Horas a Derivación'].median():.0f} hs")
-                    st.caption("Desde que el lead escribe al número comercial hasta su primera conversación "
-                               "con un asesor.")
-                with cd2:
-                    tabla_der = derivados_df[['contactName', 'Asesor', 'Primer Chat', 'Horas a Derivación']].copy()
-                    tabla_der['Primer Chat'] = tabla_der['Primer Chat'].dt.strftime('%d/%m %H:%M')
-                    tabla_der.columns = ['Lead', 'Atendido por', 'Primer Contacto', 'Horas a Derivación']
-                    st.dataframe(tabla_der.style.format({'Horas a Derivación': '{:.1f}'}),
-                                 hide_index=True, **ANCHO)
-            else:
-                st.info("Todavía ningún lead de esta línea aparece conversando en la línea de asesores. "
-                        "Con pocos días de operación es esperable: la derivación en septiembre tardó entre 24 y 44 horas.")
-
-            divider()
-
-            section_header("DETALLE", "Lead por Lead")
-            opciones_det = DESENLACES + [DES_CLIENTE]
-            filtro_des = st.multiselect("Filtrar por desenlace:", opciones_det, default=DESENLACES,
-                                        key="filtro_desenlace",
-                                        help=f"«{DES_CLIENTE}» está fuera del embudo; se puede sumar acá "
-                                             "para revisar qué consultas llegan al número comercial.")
-            det = leads[leads['Desenlace'].isin(filtro_des)].copy()
-            det = det.sort_values('Primer Chat', ascending=False)
-            det['Primer Chat'] = det['Primer Chat'].dt.strftime('%d/%m %H:%M')
-            st.caption(f"{len(det):,} leads en la selección.")
-            st.dataframe(
-                det[['contactName', 'Asesor', 'Primer Chat', 'Desenlace', 'FRT_min',
-                     'Conversaciones', 'Etiquetas']].rename(columns={
-                        'contactName': 'Lead', 'FRT_min': 'FRT (min laborales)',
-                        'Conversaciones': 'Chats'}).style.format({'FRT (min laborales)': '{:.0f}'}),
-                hide_index=True, **ANCHO
-            )
-
 
 # ---------------------------------------------------------
-# TAB LÍNEA PRINCIPAL: CARTERA / ATENCIÓN DE CLIENTES
+# ASESORES: capacidad instalada y eficiencia por persona
 # ---------------------------------------------------------
-with tab_pri:
+with tab_ase:
+
     lineas_p = list(df['conexion'].dropna().unique())
     if not lineas_p:
         st.info("No hay conexiones en la selección actual.")
@@ -2150,219 +1592,8 @@ with tab_pri:
 # ---------------------------------------------------------
 # TAB 2: BROKERS Y PATRIMONIO
 # ---------------------------------------------------------
-with tab2:
-    df_exp = df.explode('brokers')
-    df_exp['brokers'] = df_exp['brokers'].fillna('Sin Broker')
 
-    section_header("VOLUMEN TOTAL", "Análisis Global (Basado en Cantidad de Chats)")
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        broker_counts = df_exp['brokers'].value_counts().reset_index()
-        broker_counts.columns = ['Broker', 'Chats']
-        fig_broker = px.pie(
-            broker_counts, values='Chats', names='Broker', hole=0.45,
-            color='Broker', color_discrete_map=BROKER_COLORS,
-            title="Participación Global por Broker"
-        )
-        fig_broker.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-        fig_broker = apply_bdi_theme(fig_broker, legend_below=True)
-        fig_broker.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_broker, **ANCHO)
 
-    with col_b2:
-        tier_counts = df['tier'].value_counts().reset_index()
-        tier_counts.columns = ['Segmento', 'Chats']
-        fig_tier = px.pie(
-            tier_counts, values='Chats', names='Segmento', hole=0.45,
-            color='Segmento', color_discrete_map=TIER_COLORS,
-            title="Distribución Global por Segmento Patrimonial",
-            category_orders={'Segmento': TIERS + ['Sin Etiqueta Monto']}
-        )
-        fig_tier.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-        fig_tier = apply_bdi_theme(fig_tier, legend_below=True)
-        fig_tier.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_tier, **ANCHO)
-
-    divider()
-
-    section_header("CARTERA EFECTIVA", "Análisis Excluyendo Registros sin Datos")
-    col_b3, col_b4 = st.columns(2)
-    with col_b3:
-        broker_counts_filt = df_exp[df_exp['brokers'] != 'Sin Broker']['brokers'].value_counts().reset_index()
-        broker_counts_filt.columns = ['Broker', 'Chats']
-        fig_broker_filt = px.pie(
-            broker_counts_filt, values='Chats', names='Broker', hole=0.45,
-            color='Broker', color_discrete_map=BROKER_COLORS,
-            title="Participación de Brokers Activos"
-        )
-        fig_broker_filt.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-        fig_broker_filt = apply_bdi_theme(fig_broker_filt, legend_below=True)
-        fig_broker_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_broker_filt, **ANCHO)
-
-    with col_b4:
-        tier_counts_filt = df[df['tier'] != 'Sin Etiqueta Monto']['tier'].value_counts().reset_index()
-        tier_counts_filt.columns = ['Segmento', 'Chats']
-        fig_tier_filt = px.pie(
-            tier_counts_filt, values='Chats', names='Segmento', hole=0.45,
-            color='Segmento', color_discrete_map=TIER_COLORS,
-            title="Segmentación Patrimonial Activa",
-            category_orders={'Segmento': TIERS}
-        )
-        fig_tier_filt.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-        fig_tier_filt = apply_bdi_theme(fig_tier_filt, legend_below=True)
-        fig_tier_filt.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_tier_filt, **ANCHO)
-
-    divider()
-
-    section_header("ALCANCE REAL", "Análisis Basado en Usuarios Únicos")
-    col_b5, col_b6 = st.columns(2)
-    with col_b5:
-        unique_brokers = df_exp[df_exp['brokers'] != 'Sin Broker'].drop_duplicates(subset=['contactNumber', 'brokers'])
-        broker_users = unique_brokers['brokers'].value_counts().reset_index()
-        broker_users.columns = ['Broker', 'Usuarios_Unicos']
-        fig_broker_usr = px.pie(
-            broker_users, values='Usuarios_Unicos', names='Broker', hole=0.45,
-            color='Broker', color_discrete_map=BROKER_COLORS,
-            title="Personas Únicas Atendidas por Broker"
-        )
-        fig_broker_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-        fig_broker_usr = apply_bdi_theme(fig_broker_usr, legend_below=True)
-        fig_broker_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_broker_usr, **ANCHO)
-
-    with col_b6:
-        unique_tiers = df[df['tier'] != 'Sin Etiqueta Monto'].drop_duplicates(subset=['contactNumber', 'tier'])
-        tier_users = unique_tiers['tier'].value_counts().reset_index()
-        tier_users.columns = ['Segmento', 'Usuarios_Unicos']
-        fig_tier_usr = px.pie(
-            tier_users, values='Usuarios_Unicos', names='Segmento', hole=0.45,
-            color='Segmento', color_discrete_map=TIER_COLORS,
-            title="Personas Únicas Atendidas por Patrimonio",
-            category_orders={'Segmento': TIERS}
-        )
-        fig_tier_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-        fig_tier_usr = apply_bdi_theme(fig_tier_usr, legend_below=True)
-        fig_tier_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
-        st.plotly_chart(fig_tier_usr, **ANCHO)
-
-    divider()
-
-    section_header("SERVICIOS", "Etiquetas Comerciales",
-                   subtitle="Membresía, Agro, Consultoría y demás etiquetas del CRM que no son broker ni segmento.")
-    df_serv = df.explode('servicios').dropna(subset=['servicios'])
-    if not df_serv.empty:
-        col_s1, col_s2 = st.columns(2)
-        with col_s1:
-            serv_counts = df_serv.groupby('servicios')[COL_ID].nunique().reset_index(name='Chats')
-            fig_serv = px.bar(
-                serv_counts.sort_values('Chats'), x='Chats', y='servicios', orientation='h', text='Chats',
-                color='servicios', color_discrete_map=SERVICIO_COLORS,
-                title="Conversaciones por Servicio"
-            )
-            fig_serv.update_traces(textposition='outside', cliponaxis=False)
-            fig_serv = apply_bdi_theme(fig_serv)
-            fig_serv.update_layout(showlegend=False, xaxis_title="Conversaciones", yaxis_title="")
-            st.plotly_chart(fig_serv, **ANCHO)
-        with col_s2:
-            serv_users = df_serv.drop_duplicates(subset=['contactNumber', 'servicios'])
-            serv_u = serv_users.groupby('servicios')['contactNumber'].nunique().reset_index(name='Contactos')
-            fig_serv_u = px.bar(
-                serv_u.sort_values('Contactos'), x='Contactos', y='servicios', orientation='h', text='Contactos',
-                color='servicios', color_discrete_map=SERVICIO_COLORS,
-                title="Contactos Únicos por Servicio"
-            )
-            fig_serv_u.update_traces(textposition='outside', cliponaxis=False)
-            fig_serv_u = apply_bdi_theme(fig_serv_u)
-            fig_serv_u.update_layout(showlegend=False, xaxis_title="Contactos únicos", yaxis_title="")
-            st.plotly_chart(fig_serv_u, **ANCHO)
-    else:
-        st.info("No hay etiquetas de servicio en la selección actual.")
-
-    divider()
-
-    section_header("COMPOSICIÓN CRUZADA", "Brokers vs. Segmentos Patrimoniales")
-    df_tier_broker = df_exp[df_exp['tier'] != 'Sin Etiqueta Monto'].groupby(['brokers', 'tier']).size().reset_index(name='Chats')
-    totals = df_tier_broker.groupby('brokers')['Chats'].transform('sum')
-    df_tier_broker['Porcentaje'] = (df_tier_broker['Chats'] / totals * 100).round(1)
-    df_tier_broker['Texto'] = df_tier_broker['Chats'].astype(str) + " (" + df_tier_broker['Porcentaje'].astype(str) + "%)"
-
-    fig_tier_broker = px.bar(
-        df_tier_broker, x='Chats', y='brokers', color='tier',
-        barmode='group', orientation='h', text='Texto',
-        category_orders={'tier': TIERS}, color_discrete_map=TIER_COLORS,
-        title="Volumen de Consultas Patrimoniales por Broker"
-    )
-    fig_tier_broker.update_traces(textposition='outside', cliponaxis=False)
-    fig_tier_broker = apply_bdi_theme(fig_tier_broker, legend_below=True)
-    fig_tier_broker.update_layout(
-        xaxis_title="Cantidad de Chats", yaxis_title="Broker", legend_title="Segmento (USD)",
-        height=820, margin=dict(t=70, b=95, l=110, r=110)
-    )
-    st.plotly_chart(fig_tier_broker, **ANCHO)
-
-# ---------------------------------------------------------
-# TAB 3: CLIENTES
-# ---------------------------------------------------------
-with tab3:
-    section_header("RANKING", "Top 10 Clientes con Mayor Interacción")
-    df_clients_all = df.groupby(['contactName', 'contactNumber']).agg(
-        Total_Chats=(COL_ID, 'nunique'),
-        Asesor_Habitual=('user', lambda x: x.mode()[0] if not x.mode().empty else ''),
-        Segmento_Monto=('tier', lambda x: x.mode()[0] if not x.mode().empty else '')
-    ).reset_index()
-
-    df_top10 = df_clients_all.sort_values('Total_Chats', ascending=False).head(10).sort_values('Total_Chats', ascending=True)
-
-    fig_top10 = px.bar(
-        df_top10, x='Total_Chats', y='contactName', orientation='h', text='Total_Chats',
-        color='Asesor_Habitual', color_discrete_map=USER_COLORS,
-        title="Top 10 Clientes (Color = Asesor Principal)"
-    )
-    fig_top10.update_traces(textposition='outside', cliponaxis=False)
-    fig_top10 = apply_bdi_theme(fig_top10, legend_below=True)
-    fig_top10.update_layout(height=640, xaxis_title="Conversaciones", yaxis_title="",
-                            margin=dict(t=70, b=95, l=230, r=90))
-    st.plotly_chart(fig_top10, **ANCHO)
-
-    divider()
-
-    section_header("BASE DE CLIENTES", "Listado Completo e Interactivo")
-
-    df_pareto = df_clients_all.sort_values('Total_Chats', ascending=False)
-    total_chats_pareto = df_pareto['Total_Chats'].sum()
-    if total_chats_pareto > 0:
-        df_pareto['CumSum'] = df_pareto['Total_Chats'].cumsum()
-        df_pareto['CumPct'] = df_pareto['CumSum'] / total_chats_pareto
-        pareto_80_idx = df_pareto[df_pareto['CumPct'] <= 0.8].shape[0]
-        if pareto_80_idx == 0: pareto_80_idx = 1
-        pareto_client_pct = (pareto_80_idx / len(df_pareto)) * 100
-        st.info(f"💡 **Concentración de la Demanda (Ley de Pareto):** El **{pareto_client_pct:.1f}%** de los clientes ({pareto_80_idx} de {len(df_pareto)}) genera el 80% del volumen total de chats.")
-
-    search_query = st.text_input("🔍 Buscador de clientes (nombre o número telefónico):", "")
-    df_filtered_clients = df_clients_all.copy().sort_values('Total_Chats', ascending=False)
-
-    if search_query:
-        mask = (
-            df_filtered_clients['contactName'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
-            df_filtered_clients['contactNumber'].astype(str).str.contains(search_query, case=False, na=False, regex=False)
-        )
-        df_filtered_clients = df_filtered_clients[mask]
-
-    st.caption(f"Mostrando **{len(df_filtered_clients):,}** clientes registrados.")
-    st.dataframe(
-        df_filtered_clients.rename(columns={
-            'contactName': 'Nombre del Cliente', 'contactNumber': 'Número de Teléfono',
-            'Total_Chats': 'Total Chats', 'Asesor_Habitual': 'Asesor Principal', 'Segmento_Monto': 'Segmento Patrimonial'
-        }),
-        hide_index=True, **ANCHO, height=420
-    )
-
-# ---------------------------------------------------------
-# TAB 4: ACTIVIDAD POR USUARIO Y EFICIENCIA OPERATIVA
-# ---------------------------------------------------------
-with tab4:
     section_header("EFICIENCIA", "Desempeño Operativo por Asesor")
 
     total_general_chats = df[COL_ID].nunique()
@@ -2429,34 +1660,6 @@ with tab4:
             }),
             hide_index=True, **ANCHO
         )
-
-    divider()
-
-    section_header("PARTICIPACIÓN", "Distribución de la Carga Operativa por Conexión")
-    df_uc4 = df.groupby(['user', 'conexion'])[COL_ID].nunique().reset_index(name='Chats')
-    orden_u4 = df_uc4.groupby('user')['Chats'].sum().sort_values(ascending=True).index.tolist()
-    fig_pie = px.bar(
-        df_uc4, x='Chats', y='user', color='conexion', orientation='h', text='Chats',
-        color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_u4},
-        title="Conversaciones por Asesor, Divididas por Conexión"
-    )
-    fig_pie.update_traces(textposition='inside', textfont=dict(color='#FFFFFF', size=14), insidetextanchor='middle')
-    fig_pie = apply_bdi_theme(fig_pie, legend_below=True)
-    fig_pie.update_layout(barmode='stack', xaxis_title="Conversaciones", yaxis_title="",
-                          legend_title="Conexión", height=440, margin=dict(t=70, b=90, l=110, r=60))
-    st.plotly_chart(fig_pie, **ANCHO)
-
-    df_frt4 = df.groupby(['user', 'conexion'])['FRT_min'].median().reset_index()
-    fig_frt = px.bar(
-        df_frt4, x='FRT_min', y='user', color='conexion', orientation='h', text='FRT_min',
-        barmode='group', color_discrete_map=CONEXION_COLORS, category_orders={'user': orden_u4},
-        title="FRT Mediano por Asesor y Conexión (min)"
-    )
-    fig_frt.update_traces(texttemplate='%{text:.0f}', textposition='outside', cliponaxis=False)
-    fig_frt = apply_bdi_theme(fig_frt, legend_below=True)
-    fig_frt.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="Conexión", height=440,
-                          margin=dict(t=70, b=90, l=110, r=90))
-    st.plotly_chart(fig_frt, **ANCHO)
 
     divider()
 
@@ -2547,37 +1750,154 @@ with tab4:
 
     divider()
 
-    section_header("PATRIMONIO", "Distribución de Cartera por Asesor")
-    df_user_tier = df[df['tier'] != 'Sin Etiqueta Monto']
-    asesores_activos = df_user_tier['user'].dropna().unique()
-
-    if len(asesores_activos) > 0:
-        cols_pie = st.columns(3)
-        for idx, asesor in enumerate(asesores_activos):
-            df_as = df_user_tier[df_user_tier['user'] == asesor].groupby('tier').size().reset_index(name='Chats')
-            fig_p = px.pie(
-                df_as, names='tier', values='Chats',
-                title=f"Asesor: {asesor}",
-                color='tier', color_discrete_map=TIER_COLORS, hole=0.35
-            )
-            fig_p.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
-            fig_p = apply_bdi_theme(fig_p)
-            fig_p.update_layout(
-                showlegend=False,
-                margin=dict(t=45, b=15, l=30, r=30),
-                title_font=dict(color='#0F5132', size=15)
-            )
-            cols_pie[idx % 3].plotly_chart(fig_p, **ANCHO)
-        st.caption("💡 Pasá el cursor sobre cada porción para ver el detalle exacto por segmento y asesor.")
-    else:
-        st.info("No hay datos de patrimonio etiquetados para mostrar bajo los filtros actuales.")
-
-    divider()
-
 # ---------------------------------------------------------
 # TAB 5: FRICCIÓN Y COMPLEJIDAD
 # ---------------------------------------------------------
-with tab5:
+
+# ---------------------------------------------------------
+# CARTERA Y CLIENTES: brokers, patrimonio, servicios y fricción
+# ---------------------------------------------------------
+with tab_car:
+
+    df_exp = df.explode('brokers')
+    df_exp['brokers'] = df_exp['brokers'].fillna('Sin Broker')
+
+    section_header("ALCANCE REAL", "Análisis Basado en Usuarios Únicos")
+    col_b5, col_b6 = st.columns(2)
+    with col_b5:
+        unique_brokers = df_exp[df_exp['brokers'] != 'Sin Broker'].drop_duplicates(subset=['contactNumber', 'brokers'])
+        broker_users = unique_brokers['brokers'].value_counts().reset_index()
+        broker_users.columns = ['Broker', 'Usuarios_Unicos']
+        fig_broker_usr = px.pie(
+            broker_users, values='Usuarios_Unicos', names='Broker', hole=0.45,
+            color='Broker', color_discrete_map=BROKER_COLORS,
+            title="Personas Únicas Atendidas por Broker"
+        )
+        fig_broker_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
+        fig_broker_usr = apply_bdi_theme(fig_broker_usr, legend_below=True)
+        fig_broker_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
+        st.plotly_chart(fig_broker_usr, **ANCHO)
+
+    with col_b6:
+        unique_tiers = df[df['tier'] != 'Sin Etiqueta Monto'].drop_duplicates(subset=['contactNumber', 'tier'])
+        tier_users = unique_tiers['tier'].value_counts().reset_index()
+        tier_users.columns = ['Segmento', 'Usuarios_Unicos']
+        fig_tier_usr = px.pie(
+            tier_users, values='Usuarios_Unicos', names='Segmento', hole=0.45,
+            color='Segmento', color_discrete_map=TIER_COLORS,
+            title="Personas Únicas Atendidas por Patrimonio",
+            category_orders={'Segmento': TIERS}
+        )
+        fig_tier_usr.update_traces(textinfo='percent', textposition='inside', textfont=dict(size=16))
+        fig_tier_usr = apply_bdi_theme(fig_tier_usr, legend_below=True)
+        fig_tier_usr.update_layout(margin=dict(t=60, b=80, l=40, r=40))
+        st.plotly_chart(fig_tier_usr, **ANCHO)
+
+    divider()
+
+    section_header("SERVICIOS", "Etiquetas Comerciales",
+                   subtitle="Membresía, Agro, Consultoría y demás etiquetas del CRM que no son broker ni segmento.")
+    df_serv = df.explode('servicios').dropna(subset=['servicios'])
+    if not df_serv.empty:
+        serv_users = df_serv.drop_duplicates(subset=['contactNumber', 'servicios'])
+        serv_u = serv_users.groupby('servicios')['contactNumber'].nunique().reset_index(name='Contactos')
+        fig_serv_u = px.bar(
+            serv_u.sort_values('Contactos'), x='Contactos', y='servicios', orientation='h', text='Contactos',
+            color='servicios', color_discrete_map=SERVICIO_COLORS,
+            title="Contactos Únicos por Servicio"
+        )
+        fig_serv_u.update_traces(textposition='outside', cliponaxis=False)
+        fig_serv_u = apply_bdi_theme(fig_serv_u)
+        fig_serv_u.update_layout(showlegend=False, xaxis_title="Contactos únicos", yaxis_title="")
+        st.plotly_chart(fig_serv_u, **ANCHO)
+    else:
+        st.info("No hay etiquetas de servicio en la selección actual.")
+
+    divider()
+
+    section_header("COMPOSICIÓN CRUZADA", "Brokers vs. Segmentos Patrimoniales")
+    df_tier_broker = df_exp[df_exp['tier'] != 'Sin Etiqueta Monto'].groupby(['brokers', 'tier']).size().reset_index(name='Chats')
+    totals = df_tier_broker.groupby('brokers')['Chats'].transform('sum')
+    df_tier_broker['Porcentaje'] = (df_tier_broker['Chats'] / totals * 100).round(1)
+    df_tier_broker['Texto'] = df_tier_broker['Chats'].astype(str) + " (" + df_tier_broker['Porcentaje'].astype(str) + "%)"
+
+    fig_tier_broker = px.bar(
+        df_tier_broker, x='Chats', y='brokers', color='tier',
+        barmode='group', orientation='h', text='Texto',
+        category_orders={'tier': TIERS}, color_discrete_map=TIER_COLORS,
+        title="Volumen de Consultas Patrimoniales por Broker"
+    )
+    fig_tier_broker.update_traces(textposition='outside', cliponaxis=False)
+    fig_tier_broker = apply_bdi_theme(fig_tier_broker, legend_below=True)
+    fig_tier_broker.update_layout(
+        xaxis_title="Cantidad de Chats", yaxis_title="Broker", legend_title="Segmento (USD)",
+        height=820, margin=dict(t=70, b=95, l=110, r=110)
+    )
+    st.plotly_chart(fig_tier_broker, **ANCHO)
+
+# ---------------------------------------------------------
+# TAB 3: CLIENTES
+# ---------------------------------------------------------
+
+
+    section_header("RANKING", "Top 10 Clientes con Mayor Interacción")
+    df_clients_all = df.groupby(['contactName', 'contactNumber']).agg(
+        Total_Chats=(COL_ID, 'nunique'),
+        Asesor_Habitual=('user', lambda x: x.mode()[0] if not x.mode().empty else ''),
+        Segmento_Monto=('tier', lambda x: x.mode()[0] if not x.mode().empty else '')
+    ).reset_index()
+
+    df_top10 = df_clients_all.sort_values('Total_Chats', ascending=False).head(10).sort_values('Total_Chats', ascending=True)
+
+    fig_top10 = px.bar(
+        df_top10, x='Total_Chats', y='contactName', orientation='h', text='Total_Chats',
+        color='Asesor_Habitual', color_discrete_map=USER_COLORS,
+        title="Top 10 Clientes (Color = Asesor Principal)"
+    )
+    fig_top10.update_traces(textposition='outside', cliponaxis=False)
+    fig_top10 = apply_bdi_theme(fig_top10, legend_below=True)
+    fig_top10.update_layout(height=640, xaxis_title="Conversaciones", yaxis_title="",
+                            margin=dict(t=70, b=95, l=230, r=90))
+    st.plotly_chart(fig_top10, **ANCHO)
+
+    divider()
+
+    section_header("BASE DE CLIENTES", "Listado Completo e Interactivo")
+
+    df_pareto = df_clients_all.sort_values('Total_Chats', ascending=False)
+    total_chats_pareto = df_pareto['Total_Chats'].sum()
+    if total_chats_pareto > 0:
+        df_pareto['CumSum'] = df_pareto['Total_Chats'].cumsum()
+        df_pareto['CumPct'] = df_pareto['CumSum'] / total_chats_pareto
+        pareto_80_idx = df_pareto[df_pareto['CumPct'] <= 0.8].shape[0]
+        if pareto_80_idx == 0: pareto_80_idx = 1
+        pareto_client_pct = (pareto_80_idx / len(df_pareto)) * 100
+        st.info(f"💡 **Concentración de la Demanda (Ley de Pareto):** El **{pareto_client_pct:.1f}%** de los clientes ({pareto_80_idx} de {len(df_pareto)}) genera el 80% del volumen total de chats.")
+
+    search_query = st.text_input("🔍 Buscador de clientes (nombre o número telefónico):", "")
+    df_filtered_clients = df_clients_all.copy().sort_values('Total_Chats', ascending=False)
+
+    if search_query:
+        mask = (
+            df_filtered_clients['contactName'].astype(str).str.contains(search_query, case=False, na=False, regex=False) |
+            df_filtered_clients['contactNumber'].astype(str).str.contains(search_query, case=False, na=False, regex=False)
+        )
+        df_filtered_clients = df_filtered_clients[mask]
+
+    st.caption(f"Mostrando **{len(df_filtered_clients):,}** clientes registrados.")
+    st.dataframe(
+        df_filtered_clients.rename(columns={
+            'contactName': 'Nombre del Cliente', 'contactNumber': 'Número de Teléfono',
+            'Total_Chats': 'Total Chats', 'Asesor_Habitual': 'Asesor Principal', 'Segmento_Monto': 'Segmento Patrimonial'
+        }),
+        hide_index=True, **ANCHO, height=420
+    )
+
+# ---------------------------------------------------------
+# TAB 4: ACTIVIDAD POR USUARIO Y EFICIENCIA OPERATIVA
+# ---------------------------------------------------------
+
+
     df_exp_5 = df.explode('brokers')
     df_exp_5['brokers'] = df_exp_5['brokers'].fillna('Sin Broker')
 
@@ -2625,44 +1945,12 @@ with tab5:
                              showlegend=False, height=420, margin=dict(t=70, b=55, l=110, r=120))
     st.plotly_chart(fig_fric_b, **ANCHO)
 
-    df_fric_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier').agg(
-        Chats=(COL_ID, 'nunique'), Usuarios=('contactNumber', 'nunique')
-    ).reset_index()
-    df_fric_tier['Ratio'] = df_fric_tier['Chats'] / df_fric_tier['Usuarios']
-
-    fig_fric_t = px.bar(
-        df_fric_tier, x='Ratio', y='tier', orientation='h', text='Ratio',
-        color='tier', color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
-        title="Ratio de Chats por Usuario (por Patrimonio)"
-    )
-    fig_fric_t.update_traces(texttemplate='%{text:.2f} chats/usr', textposition='outside', cliponaxis=False)
-    fig_fric_t = add_reference_line(fig_fric_t, df_fric_tier['Ratio'].mean(), orientation='v')
-    fig_fric_t = apply_bdi_theme(fig_fric_t)
-    fig_fric_t.update_layout(xaxis_title="Promedio de Chats por Cliente", yaxis_title="Segmento Patrimonial",
-                             showlegend=False, height=460, margin=dict(t=70, b=55, l=170, r=120))
-    st.plotly_chart(fig_fric_t, **ANCHO)
-
     divider()
 
     section_header(
         "COMPLEJIDAD OPERATIVA", "Análisis de Tiempos de Atención (SLA)",
         subtitle="Cruza tiempos de resolución y de primera respuesta con plataformas y patrimonio."
     )
-
-    df_comp_broker = df_exp_5[df_exp_5['brokers'] != 'Sin Broker'].groupby('brokers')['res_time_wh_min'].median().reset_index()
-
-    fig_comp_b = px.bar(
-        df_comp_broker.sort_values('res_time_wh_min', ascending=True),
-        x='res_time_wh_min', y='brokers', orientation='h', text='res_time_wh_min',
-        color='brokers', color_discrete_map=BROKER_COLORS,
-        title="Tiempo Mediano de Resolución por Broker"
-    )
-    fig_comp_b.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False)
-    fig_comp_b = add_reference_line(fig_comp_b, df_comp_broker['res_time_wh_min'].mean(), orientation='v')
-    fig_comp_b = apply_bdi_theme(fig_comp_b)
-    fig_comp_b.update_layout(xaxis_title="Minutos (Mediana) en Horario Laboral", yaxis_title="Broker",
-                             showlegend=False, height=420, margin=dict(t=70, b=55, l=110, r=120))
-    st.plotly_chart(fig_comp_b, **ANCHO)
 
     df_comp_tier = df[df['tier'] != 'Sin Etiqueta Monto'].groupby('tier')['FRT_min'].median().reset_index()
 
@@ -2680,3 +1968,336 @@ with tab5:
 
     st.caption("🟡 La línea punteada dorada marca el promedio del grupo. Los tiempos usan **mediana**: "
                "unas pocas conversaciones que quedan abiertas varios días vuelven engañoso el promedio simple.")
+
+# ---------------------------------------------------------
+# COMERCIAL: embudo de ventas
+# ---------------------------------------------------------
+with tab_com:
+
+    lineas = list(df['conexion'].dropna().unique())
+    if not lineas:
+        st.info("No hay conexiones en la selección actual.")
+    else:
+        sugerida = detectar_linea_captacion(df)
+        idx = lineas.index(sugerida) if sugerida in lineas else 0
+        linea_cap = st.selectbox(
+            "Línea de captación a analizar:", lineas, index=idx,
+            help="Por defecto se propone la línea con mayor proporción de contactos nuevos. "
+                 "Si mañana sumás otra línea comercial, aparece acá sola."
+        )
+
+        df_cap = df[df['conexion'] == linea_cap]
+        leads = analizar_captacion(df_cap, df_raw, linea_cap)
+
+        if leads.empty:
+            st.info(f"No hay conversaciones de **{linea_cap}** en la selección actual.")
+        else:
+            # ---- Base del embudo: TODOS los contactos únicos que escribieron al comercial.
+            # Después se van descontando, en este orden, los que no son lead de verdad.
+            total_leads = len(leads)
+            es_cliente = ((leads['Desenlace'] == DES_CLIENTE) | (leads['Estado'] == 'Ya era cliente'))
+            es_no_califica = (leads['Desenlace'] == DES_NO_CALIFICA) & ~es_cliente
+
+            n_cliente = int(es_cliente.sum())
+            no_califica = int(es_no_califica.sum())
+
+            nuevos = leads[~es_cliente & ~es_no_califica]
+            n_leads = len(nuevos)
+
+            respondidos = int(nuevos['Respondido'].sum())
+            rapidos = int((nuevos['FRT_min'] < 15).sum())
+            n_membresia = int((nuevos['Desenlace'] == DES_MEMBRESIA).sum())
+            n_consultoria = int((nuevos['Desenlace'] == DES_CONSULTORIA).sum())
+            n_derivado = int((nuevos['Desenlace'] == DES_DERIVADO).sum())
+            sin_definir = int((nuevos['Desenlace'] == DES_SIN_DEFINIR).sum())
+            n_ganados = n_membresia + n_consultoria + n_derivado
+            conversion = n_ganados / n_leads * 100 if n_leads else np.nan
+            horas_der = nuevos.loc[nuevos['Desenlace'] == DES_DERIVADO, 'Horas a Derivación'].median()
+
+            section_header("EMBUDO", f"Del Primer Mensaje a la Venta · {linea_cap}",
+                           subtitle="La unidad es el contacto único, no la conversación. Cada escalón "
+                                    "descuenta a los que no son lead de verdad, y el último se abre "
+                                    "en las tres formas de ganarlo.")
+
+            # ---- Embudo centrado de cuatro niveles.
+            # Cada fila es una barra apilada con un espaciador transparente a la izquierda,
+            # de ancho (máximo − total de la fila) / 2. Eso la centra y produce la silueta
+            # de embudo sin salir de go.Bar, que permite segmentar el último nivel.
+            etiquetas_y = ['4 · Leads ganados', '3 · Leads nuevos reales',
+                           '2 · Aplican a nuestros servicios', '1 · Escribieron al comercial']
+            anchos = [n_ganados, n_leads, total_leads - no_califica, total_leads]
+            ancho_max = max(total_leads, 1)
+
+            def _pct(v, base):
+                return f"{v / base * 100:.0f}%" if base else "s/d"
+
+            espaciador = [(ancho_max - a) / 2 for a in anchos]
+            fig_emb = go.Figure()
+            fig_emb.add_bar(y=etiquetas_y, x=espaciador, orientation='h',
+                            marker=dict(color='rgba(0,0,0,0)'), showlegend=False,
+                            hoverinfo='skip', name='')
+            fig_emb.add_bar(
+                y=etiquetas_y, x=[0] + anchos[1:], orientation='h',
+                marker=dict(color=['rgba(0,0,0,0)', COLOR_ETAPA_3, COLOR_ETAPA_2, COLOR_ETAPA_1],
+                            line=dict(color='#FFFFFF', width=2)),
+                text=['',
+                      f"{n_leads} leads nuevos · {_pct(n_leads, total_leads)} de los que escribieron",
+                      f"{anchos[2]} aplican · {_pct(anchos[2], total_leads)}",
+                      f"{total_leads} contactos únicos"],
+                textposition='inside', insidetextanchor='middle',
+                textfont=dict(color='#FFFFFF', size=16, family='Inter, Segoe UI, sans-serif'),
+                showlegend=False, name='Etapa',
+                hovertemplate="%{y}<br>%{x} contactos<extra></extra>"
+            )
+            for etiqueta, valor in [(DES_MEMBRESIA, n_membresia),
+                                    (DES_CONSULTORIA, n_consultoria),
+                                    (DES_DERIVADO, n_derivado)]:
+                corto = etiqueta.split(' - ')[0].split(' a ')[0]
+                fig_emb.add_bar(
+                    y=etiquetas_y, x=[valor, 0, 0, 0], orientation='h', name=etiqueta,
+                    marker=dict(color=DESENLACE_COLORS[etiqueta], line=dict(color='#FFFFFF', width=2)),
+                    text=[f"{corto}<br>{valor} · {_pct(valor, n_leads)}" if valor else '', '', '', ''],
+                    textposition='inside', insidetextanchor='middle',
+                    textfont=dict(color='#FFFFFF', size=15, family='Inter, Segoe UI, sans-serif'),
+                    hovertemplate=f"<b>{etiqueta}</b><br>%{{x}} leads<extra></extra>"
+                )
+
+            fig_emb = apply_bdi_theme(fig_emb, legend_below=True)
+            fig_emb.update_layout(
+                title=dict(text=f"Embudo Comercial · {linea_cap}",
+                           font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
+                barmode='stack', bargap=0.32,
+                xaxis=dict(visible=False, range=[0, ancho_max * 1.02]),
+                yaxis=dict(tickfont=dict(color='#0F5132', size=15), showgrid=False,
+                           categoryorder='array', categoryarray=etiquetas_y),
+                legend_title="Cómo se ganó",
+                uniformtext=dict(minsize=12, mode='hide'),
+                height=500, margin=dict(t=80, b=110, l=260, r=80)
+            )
+            # Cada pérdida anotada a la derecha de su escalón.
+            for fila, cantidad, texto, color in [
+                ('2 · Aplican a nuestros servicios', no_califica, 'no califica', '#D6336C'),
+                ('3 · Leads nuevos reales', n_cliente, 'ya eran clientes', '#8A6D00'),
+                ('4 · Leads ganados', sin_definir, 'sin definir', '#7A867F')]:
+                if cantidad:
+                    fig_emb.add_annotation(x=ancho_max, y=fila, xanchor='left', yanchor='middle',
+                                           text=f"<b>−{cantidad}</b> {texto}", showarrow=False,
+                                           xshift=12, font=dict(color=color, size=14))
+            st.plotly_chart(fig_emb, **ANCHO)
+
+            k = st.columns(5)
+            k[0].metric("Escribieron", f"{total_leads:,}", help="Contactos únicos que escribieron al número comercial.")
+            k[1].metric("Leads Nuevos", f"{n_leads:,}",
+                        delta=f"−{no_califica} no califica · −{n_cliente} ya clientes",
+                        delta_color="off",
+                        help="Lo que queda tras descontar a los que no califican y a los que ya eran clientes.")
+            k[2].metric("Leads Ganados", f"{n_ganados:,}", help="Membresía + consultoría + derivados a un asesor.")
+            k[3].metric("Tasa de Conversión", f"{conversion:.1f}%" if pd.notna(conversion) else "s/d",
+                        help="Ganados sobre leads nuevos reales. Es un piso mientras queden leads sin definir.")
+            k[4].metric("Sin Definir", f"{sin_definir:,}",
+                        delta=f"{sin_definir/n_leads*100:.0f}% de los leads" if n_leads else None,
+                        delta_color="off",
+                        help="Sin etiqueta, o con una que no es ninguna de las cuatro de cierre.")
+
+            k2 = st.columns(5)
+            k2[0].metric("Membresías", f"{n_membresia:,}", help="Etiqueta «Membresia - Comercial».")
+            k2[1].metric("Consultorías", f"{n_consultoria:,}", help="Etiqueta «Consultoria - Comercial».")
+            k2[2].metric("Derivados", f"{n_derivado:,}",
+                         delta=f"{horas_der:.0f} hs hasta derivar" if pd.notna(horas_der) else None,
+                         delta_color="off",
+                         help="Etiqueta de derivación, o el contacto aparece después conversando con un asesor.")
+            k2[3].metric("Tasa de Respuesta", f"{respondidos/n_leads*100:.0f}%" if n_leads else "s/d",
+                         help="Leads nuevos que recibieron al menos una respuesta.")
+            k2[4].metric("FRT p90", f"{nuevos['FRT_min'].quantile(0.9):.0f} min" if nuevos['FRT_min'].notna().any() else "s/d",
+                         help="El 10% peor de los leads espera al menos esto, en minutos de jornada laboral.")
+
+            conv_sin_resp = int(df_cap['FRT_min'].isna().sum())
+            if conv_sin_resp > (n_leads - respondidos):
+                st.caption(f"⚠️ Ojo con la diferencia de unidades: **{n_leads - respondidos} lead(s) nunca "
+                           f"recibieron ninguna respuesta**, pero hubo **{conv_sin_resp} conversaciones sin "
+                           "responder**. La diferencia son personas ya contestadas alguna vez que volvieron "
+                           "a escribir y quedaron sin respuesta en ese segundo intento.")
+
+            # Los clientes existentes ya aparecen como escalón del embudo; acá solo se
+            # desglosa por qué quedaron fuera y si alguno igual terminó comprando.
+            con_tag = int((leads['Desenlace'] == DES_CLIENTE).sum())
+            solo_historial = n_cliente - con_tag
+            if n_cliente:
+                detalle_cli = []
+                if con_tag:
+                    detalle_cli.append(f"{con_tag} con etiqueta de membresía o consultoría vigente")
+                if solo_historial:
+                    detalle_cli.append(f"{solo_historial} que ya conversaban con la mesa de asesores")
+                st.caption(f"ℹ️ Los **{n_cliente} contactos que ya eran clientes** se descuentan en el "
+                           f"escalón 3: {' y '.join(detalle_cli)}. No son captación, pero miden cuánta "
+                           "carga de consulta absorbe el número comercial.")
+
+            ganados_clientes = int(leads.loc[es_cliente, 'Desenlace'].isin(DESENLACES_GANADOS).sum())
+            if ganados_clientes:
+                st.caption(f"💰 De esos clientes existentes, **{ganados_clientes} terminaron comprando** "
+                           "por este número. Es upsell, no captación de leads nuevos, así que no entra "
+                           "en la tasa de conversión — pero la venta se hizo acá.")
+
+            if n_ganados == 0 and n_leads:
+                st.info("Todavía no hay ningún lead con las etiquetas **«Membresia - Comercial»** o "
+                        "**«Consultoria - Comercial»**. El tablero ya las reconoce: en cuanto se carguen "
+                        "en Whaticket, el embudo se llena solo, sin tocar el código.", icon="🏷️")
+
+            divider()
+
+            section_header("VELOCIDAD", "Cuánto Tarda en Contestarse un Lead",
+                           subtitle=f"Minutos de jornada laboral ({HORARIO_TXT} hs). En captación lo que "
+                                    "define el resultado es la cola, no el promedio.")
+            col_v1, col_v2 = st.columns([3, 2])
+            with col_v1:
+                tramos = (nuevos['Tramo'].value_counts()
+                          .reindex(ORDEN_TRAMOS).fillna(0).reset_index())
+                tramos.columns = ['Tramo', 'Leads']
+                tramos['Pct'] = tramos['Leads'] / n_leads * 100
+                tramos['Texto'] = tramos.apply(lambda r: f"{int(r['Leads'])} ({r['Pct']:.0f}%)", axis=1)
+                fig_tr = px.bar(
+                    tramos[::-1], x='Leads', y='Tramo', orientation='h', text='Texto',
+                    color='Tramo', color_discrete_map=TRAMO_COLORS,
+                    category_orders={'Tramo': ORDEN_TRAMOS[::-1]},
+                    title="Semáforo de Primera Respuesta"
+                )
+                fig_tr.update_traces(textposition='outside', cliponaxis=False)
+                fig_tr = apply_bdi_theme(fig_tr)
+                fig_tr.update_layout(showlegend=False, xaxis_title="Leads", yaxis_title="",
+                                     height=400, margin=dict(t=70, b=55, l=185, r=110))
+                st.plotly_chart(fig_tr, **ANCHO)
+            with col_v2:
+                dentro = nuevos[~nuevos['fuera_horario']]['FRT_min'].median()
+                fuera = nuevos[nuevos['fuera_horario']]['FRT_min'].median()
+                n_fuera = int(nuevos['fuera_horario'].sum())
+                st.markdown("##### Dentro vs. fuera de horario")
+                real_med = nuevos['FRT_real'].median()
+                st.metric("Espera real del lead (reloj de pared)",
+                          f"{real_med/60:.1f} hs" if pd.notna(real_med) else "s/d",
+                          help="Tiempo calendario que el lead percibe, sin descontar noches ni fines de "
+                               "semana. Las demás métricas usan minutos de jornada laboral.")
+                st.metric("Leads fuera de horario", f"{n_fuera:,}",
+                          help=f"Entraron fuera de la jornada de {HORARIO_TXT} hs, o un fin de semana o feriado.")
+                st.metric("FRT mediano dentro de horario", f"{dentro:.0f} min" if pd.notna(dentro) else "s/d")
+                st.metric("FRT mediano fuera de horario", f"{fuera:.0f} min" if pd.notna(fuera) else "s/d")
+                if pd.notna(dentro) and pd.notna(fuera) and fuera > dentro * 3:
+                    st.warning(f"Aun midiendo solo minutos de jornada, un lead que entra fuera de horario "
+                               f"espera **{fuera/dentro:.0f} veces más**. "
+                               "Un autorespondedor que fije expectativa y pida datos cuesta poco y tapa ese agujero.",
+                               icon="⚠️")
+
+            divider()
+
+            divider()
+
+            section_header("POR ASESOR", "Volumen, Velocidad y Cierre en una Sola Tabla",
+                           subtitle="Antes esto estaba partido en dos tablas con columnas repetidas. "
+                                    "Acá se ve de corrido: cuántos leads tomó cada uno, cuán rápido "
+                                    "contestó y en qué terminaron.")
+
+            por_asesor = nuevos.groupby('Asesor').agg(
+                Leads=('contactNumber', 'nunique'),
+                Respondidos=('Respondido', 'sum'),
+                FRT_Mediano=('FRT_min', 'median'),
+                FRT_p90=('FRT_min', lambda s: s.quantile(0.9)),
+                Membresias=('Desenlace', lambda s: int((s == DES_MEMBRESIA).sum())),
+                Consultorias=('Desenlace', lambda s: int((s == DES_CONSULTORIA).sum())),
+                Derivados=('Desenlace', lambda s: int((s == DES_DERIVADO).sum())),
+                No_Califica=('Desenlace', lambda s: int((s == DES_NO_CALIFICA).sum())),
+                Sin_Definir=('Desenlace', lambda s: int((s == DES_SIN_DEFINIR).sum())),
+            ).reset_index()
+            por_asesor['Sin Responder'] = por_asesor['Leads'] - por_asesor['Respondidos']
+            por_asesor['Aplican'] = por_asesor['Leads'] - por_asesor['No_Califica']
+            por_asesor['Ganados'] = (por_asesor['Membresias'] + por_asesor['Consultorias']
+                                     + por_asesor['Derivados'])
+            por_asesor['% Conversión'] = np.where(por_asesor['Aplican'] > 0,
+                                                  por_asesor['Ganados'] / por_asesor['Aplican'] * 100, np.nan)
+            por_asesor['% Sin Definir'] = por_asesor['Sin_Definir'] / por_asesor['Leads'] * 100
+            por_asesor = por_asesor.sort_values('Leads', ascending=False)
+
+            st.dataframe(
+                por_asesor[['Asesor', 'Leads', 'Sin Responder', 'FRT_Mediano', 'FRT_p90',
+                            'No_Califica', 'Aplican', 'Membresias', 'Consultorias', 'Derivados',
+                            'Ganados', '% Conversión', 'Sin_Definir', '% Sin Definir']].rename(columns={
+                    'FRT_Mediano': 'FRT Mediano', 'FRT_p90': 'FRT p90', 'No_Califica': 'No Califica',
+                    'Membresias': 'Membresías', 'Consultorias': 'Consultorías',
+                    'Sin_Definir': 'Sin Definir'}).style.format({
+                        'FRT Mediano': '{:.0f}', 'FRT p90': '{:.0f}',
+                        '% Conversión': '{:.1f}%', '% Sin Definir': '{:.0f}%'}),
+                column_config={
+                    "FRT Mediano": st.column_config.NumberColumn(help="Minutos de jornada hasta la primera respuesta."),
+                    "FRT p90": st.column_config.NumberColumn(help="El 10% de leads peor atendidos esperó al menos esto."),
+                    "Aplican": st.column_config.NumberColumn(help="Leads menos los etiquetados «No califica»."),
+                    "Ganados": st.column_config.NumberColumn(help="Membresías + consultorías + derivados."),
+                    "% Conversión": st.column_config.NumberColumn(help="Ganados sobre los leads que aplican."),
+                },
+                hide_index=True, **ANCHO
+            )
+
+            if len(por_asesor):
+                top = por_asesor.iloc[0]
+                peso = top['Leads'] / n_leads * 100 if n_leads else 0
+                if peso > 70:
+                    st.warning(f"**{top['Asesor']}** concentra el **{peso:.0f}%** de los leads de esta línea. "
+                               "Si está en una reunión o de licencia, la captación se frena entera.", icon="⚠️")
+
+            section_header("FLUJO", "Entrada de Leads y Ventanas sin Cobertura")
+            col_f1, col_f2 = st.columns(2)
+            with col_f1:
+                por_dia = nuevos.groupby(['fecha', 'Desenlace']).size().reset_index(name='Leads')
+                fig_fd = px.bar(
+                    por_dia, x='fecha', y='Leads', color='Desenlace',
+                    color_discrete_map=DESENLACE_COLORS,
+                    category_orders={'Desenlace': DESENLACES},
+                    title="Leads por Día y Desenlace"
+                )
+                fig_fd = apply_bdi_theme(fig_fd, legend_below=True)
+                fig_fd.update_layout(barmode='stack', xaxis_title="Fecha", yaxis_title="Leads",
+                                     legend_title="", height=340)
+                st.plotly_chart(fig_fd, **ANCHO)
+            with col_f2:
+                por_hora = nuevos.groupby('hora_ingreso').agg(
+                    Leads=('contactNumber', 'count'), FRT=('FRT_min', 'median')).reset_index()
+                fig_fh = go.Figure()
+                fig_fh.add_bar(x=por_hora['hora_ingreso'], y=por_hora['Leads'], name='Leads que entran',
+                               marker_color='#8FBF74')
+                fig_fh.add_scatter(x=por_hora['hora_ingreso'], y=por_hora['FRT'], name='FRT mediano (min)',
+                                   yaxis='y2', mode='lines+markers',
+                                   line=dict(color='#C9A227', width=3), marker=dict(size=8))
+                fig_fh = apply_bdi_theme(fig_fh, legend_below=True)
+                fig_fh.update_layout(
+                    title=dict(text="Hora de Entrada vs. Demora en Responder", font=dict(color='#0F5132', size=17), x=0.01),
+                    xaxis=dict(title="Hora del día", dtick=1),
+                    yaxis=dict(title="Leads"),
+                    yaxis2=dict(title="Minutos", overlaying='y', side='right', showgrid=False,
+                                title_font=dict(color='#8A6D00'), tickfont=dict(color='#8A6D00')),
+                    height=340
+                )
+                st.plotly_chart(fig_fh, **ANCHO)
+            st.caption("💡 Las horas donde la barra es alta y la línea dorada también lo es son las ventanas "
+                       "a cubrir primero: ahí entra volumen y se responde tarde.")
+
+            divider()
+
+            section_header("DETALLE", "Lead por Lead")
+            opciones_det = DESENLACES + [DES_CLIENTE]
+            filtro_des = st.multiselect("Filtrar por desenlace:", opciones_det, default=DESENLACES,
+                                        key="filtro_desenlace",
+                                        help=f"«{DES_CLIENTE}» está fuera del embudo; se puede sumar acá "
+                                             "para revisar qué consultas llegan al número comercial.")
+            det = leads[leads['Desenlace'].isin(filtro_des)].copy()
+            det = det.sort_values('Primer Chat', ascending=False)
+            det['Primer Chat'] = det['Primer Chat'].dt.strftime('%d/%m %H:%M')
+            st.caption(f"{len(det):,} leads en la selección.")
+            st.dataframe(
+                det[['contactName', 'Asesor', 'Primer Chat', 'Desenlace', 'FRT_min',
+                     'Conversaciones', 'Etiquetas']].rename(columns={
+                        'contactName': 'Lead', 'FRT_min': 'FRT (min laborales)',
+                        'Conversaciones': 'Chats'}).style.format({'FRT (min laborales)': '{:.0f}'}),
+                hide_index=True, **ANCHO
+            )
+
+
+# ---------------------------------------------------------
+# TAB LÍNEA PRINCIPAL: CARTERA / ATENCIÓN DE CLIENTES
+# ---------------------------------------------------------
