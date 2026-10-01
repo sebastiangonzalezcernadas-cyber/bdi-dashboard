@@ -1044,158 +1044,716 @@ def procesar(df, dedup=True):
 
 
 # -----------------------------------------------------------
-# REGISTRO PARA EL REPORTE PDF
+# GRÁFICO COMPARTIDO: COMPOSICIÓN PATRIMONIAL POR ASESOR
 # -----------------------------------------------------------
-# Cada gráfico y cada tabla se anota con la sección a la que pertenece mientras se
-# dibuja. Como Streamlit ejecuta el script entero en cada rerun (incluido el cuerpo
-# de todas las solapas), para cuando se arma el PDF ya están todos registrados.
-REPORTE = {'asesores': [], 'comercial': []}
+def fig_patrimonio_por_asesor(d, para_pdf=False):
+    """Una torta por asesor con su mix de segmentos patrimoniales.
+
+    Se arma como subplots en una sola figura (en vez de N gráficos sueltos) para
+    que comparta leyenda y se pueda exportar al PDF de una sola pieza. Las
+    etiquetas muestran cantidad y porcentaje sin depender del hover.
+    """
+    from plotly.subplots import make_subplots
+
+    dd = d[d['tier'] != 'Sin Etiqueta Monto']
+    if dd.empty:
+        return None
+    orden = dd.groupby('user')[COL_ID].nunique().sort_values(ascending=False).index.tolist()
+    if not orden:
+        return None
+
+    cols = min(3, len(orden))
+    filas = int(np.ceil(len(orden) / cols))
+    fig = make_subplots(
+        rows=filas, cols=cols,
+        specs=[[{'type': 'domain'} for _ in range(cols)] for _ in range(filas)],
+        subplot_titles=[f"{a} · {dd[dd['user'] == a][COL_ID].nunique():,} chats" for a in orden],
+        vertical_spacing=0.14, horizontal_spacing=0.04
+    )
+    for i, asesor in enumerate(orden):
+        g = dd[dd['user'] == asesor].groupby('tier')[COL_ID].nunique().reindex(TIERS).fillna(0)
+        fig.add_trace(go.Pie(
+            labels=list(g.index), values=list(g.values), hole=0.38,
+            marker=dict(colors=[TIER_COLORS[t] for t in g.index],
+                        line=dict(color='#FFFFFF', width=2)),
+            texttemplate='%{value}<br>%{percent}', textposition='inside',
+            textfont=dict(size=13 if para_pdf else 12, color='#FFFFFF'),
+            insidetextorientation='horizontal',
+            sort=False, showlegend=(i == 0),
+            hovertemplate="<b>%{label}</b><br>%{value} chats (%{percent})<extra></extra>"
+        ), row=i // cols + 1, col=i % cols + 1)
+
+    for ann in fig.layout.annotations:
+        ann.font = dict(color='#0F5132', size=15 if para_pdf else 14,
+                        family='Inter, Segoe UI, sans-serif')
+    fig.update_layout(
+        title=dict(text="Mix Patrimonial de la Cartera de Cada Asesor",
+                   font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
+        legend=dict(orientation='h', yanchor='top', y=-0.06, xanchor='center', x=0.5,
+                    font=dict(size=13), title=dict(text="Segmento (USD)")),
+        height=max(330 * filas, 380),
+        paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=14),
+        margin=dict(t=90, b=90, l=30, r=30),
+        uniformtext=dict(minsize=11, mode='hide')
+    )
+    return fig
 
 def grafico(fig, titulo, seccion, alto=None):
-    """Dibuja el gráfico y lo deja listo para el PDF."""
-    REPORTE[seccion].append({'tipo': 'fig', 'titulo': titulo, 'obj': fig,
-                             'alto': alto or fig.layout.height or 450})
+    """Dibuja el gráfico en pantalla. El PDF arma los suyos aparte, desde datos
+    filtrados por conexión, para que un reporte de asesores no arrastre comercial."""
     st.plotly_chart(fig, **ANCHO)
-
-def tabla_reporte(df_tabla, titulo, seccion):
-    REPORTE[seccion].append({'tipo': 'tabla', 'titulo': titulo, 'obj': df_tabla.copy()})
-
-def texto_reporte(txt, seccion):
-    REPORTE[seccion].append({'tipo': 'texto', 'obj': txt})
-
-def kpis_reporte(pares, titulo, seccion):
-    REPORTE[seccion].append({'tipo': 'kpis', 'titulo': titulo, 'obj': list(pares)})
 
 
 
 # ===========================================================
 # REPORTE PDF
 # ===========================================================
-def _fig_a_png(fig, ancho_px=1500, alto_px=460):
-    """Exporta una figura de Plotly a PNG. kaleido 0.2.1 trae su propio chromium,
-    así que no depende de que haya un navegador instalado en el servidor."""
-    copia = go.Figure(fig)
-    copia.update_layout(paper_bgcolor='#FFFFFF', plot_bgcolor='#FFFFFF')
-    return copia.to_image(format='png', width=ancho_px, height=alto_px, scale=2)
+# Las figuras del PDF se arman acá, aparte de las de pantalla y SIEMPRE sobre un
+# dataframe ya filtrado por conexión: así un reporte "Solo Asesores" no arrastra
+# ni un chat del comercial. Además se dibujan con márgenes y tipografías pensados
+# para papel — en pantalla sobra lugar, en A4 apaisado no.
+# ===========================================================
 
-def _estilo_tabla(n_filas):
-    from reportlab.lib import colors
-    from reportlab.platypus import TableStyle
-    filas = [
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F5132')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, -1), 7.5),
-        ('ALIGN', (1, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#DDE5E1')),
-        ('TOPPADDING', (0, 0), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-    ]
-    for i in range(1, n_filas):
-        if i % 2 == 0:
-            filas.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#F4F9F6')))
-    return TableStyle(filas)
+def _tema_pdf(fig, alto, leyenda=False, izq=70, inf=70):
+    """Normaliza una figura para impresión: fondo blanco, tipografía grande y
+    suficiente aire abajo para que la leyenda no se monte sobre el título del eje."""
+    fig.update_layout(
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=15),
+        title=dict(font=dict(color='#0F5132', size=19), x=0.01, xanchor='left'),
+        paper_bgcolor='#FFFFFF', plot_bgcolor='#FFFFFF',
+        height=alto, margin=dict(t=64, b=inf, l=izq, r=60),
+        uniformtext=dict(minsize=11, mode='hide'),
+        showlegend=leyenda
+    )
+    if leyenda:
+        # La leyenda va MUY por debajo del eje y el margen inferior se agranda en
+        # consecuencia: con y=-0.22 el título del eje X quedaba escrito encima.
+        fig.update_layout(margin=dict(t=64, b=max(inf, 135), l=izq, r=60),
+                          legend=dict(orientation='h', yanchor='top', y=-0.34,
+                                      xanchor='center', x=0.5, font=dict(size=13),
+                                      bgcolor='rgba(0,0,0,0)'))
+    fig.update_xaxes(gridcolor='#EAF0ED', title_font=dict(color='#3F4F49', size=14),
+                     tickfont=dict(color='#4A5D57', size=13), title_standoff=14)
+    fig.update_yaxes(gridcolor='#EAF0ED', title_font=dict(color='#3F4F49', size=14),
+                     tickfont=dict(color='#4A5D57', size=13))
+    return fig
 
-def construir_pdf(secciones, titulo, subtitulo, meta):
-    """Arma el PDF en A4 apaisado: portada, KPIs, tablas y gráficos de cada sección."""
+def _acortar(serie, largo=26):
+    return serie.astype(str).map(lambda t: t if len(t) <= largo else t[:largo - 1] + '…')
+
+def _item(titulo, desc, fig, ancho='full', ratio=0.34):
+    return {'tipo': 'fig', 'titulo': titulo, 'desc': desc, 'obj': fig,
+            'ancho': ancho, 'ratio': ratio}
+
+def figuras_asesores(d, linea, periodos_orden):
+    """Todo el bloque de asesores, calculado sobre `d` (ya filtrado a esa línea)."""
+    items = []
+    if d.empty:
+        return items
+
+    conv = d[COL_ID].nunique()
+    cont = d['contactNumber'].nunique()
+    dias = dias_habiles_efectivos(d['createdAt_dt'])
+    items.append({'tipo': 'kpis', 'titulo': f"Capacidad instalada · {linea}",
+                  'desc': f"Medido sobre {dias} días hábiles reales del período, con jornada de "
+                          f"{HORARIO_TXT} hs. Todos los tiempos descuentan noches, fines de semana y feriados.",
+                  'obj': [("Conversaciones", f"{conv:,}"), ("Clientes atendidos", f"{cont:,}"),
+                          ("Chats por cliente", f"{conv/cont:.2f}" if cont else "s/d"),
+                          ("Chats por día hábil", f"{conv/dias:.1f}" if dias else "s/d"),
+                          ("Chats por hora", f"{conv/dias/HORAS_JORNADA:.1f}" if dias else "s/d"),
+                          ("FRT mediano", f"{d['FRT_min'].median():.0f} min" if d['FRT_min'].notna().any() else "s/d"),
+                          ("FRT p90", f"{d['FRT_min'].quantile(0.9):.0f} min" if d['FRT_min'].notna().any() else "s/d"),
+                          ("Resolución mediana", f"{d['res_time_wh_min'].median():.0f} min" if d['res_time_wh_min'].notna().any() else "s/d")]})
+
+    # 1 · Volumen mes a mes
+    dm = d.groupby('periodo')[COL_ID].nunique().reset_index(name='Chats').sort_values('periodo')
+    f = px.bar(dm, x='periodo', y='Chats', text='Chats', color_discrete_sequence=['#157347'],
+               category_orders={'periodo': periodos_orden}, title="Volumen Mensual de Conversaciones")
+    f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
+    _tema_pdf(f, 400, inf=90)
+    f.update_layout(xaxis_title="", yaxis_title="Conversaciones", xaxis=dict(tickangle=-25))
+    items.append(_item("Cuánto trabajo entra, mes a mes",
+                       "Conversaciones únicas iniciadas en cada mes. Es la medida de carga: cuánto "
+                       "volumen tuvo que absorber el equipo. Compararlo contra la dotación del mes "
+                       "muestra si el crecimiento se está acompañando con gente.", f, ratio=0.235))
+
+    # 2 · Carga horaria
+    dh = d[(d['hora'] >= HORA_GRAF_INI) & (d['hora'] <= HORA_GRAF_FIN)]
+    if not dh.empty:
+        dh = dh.groupby('hora_30m')[COL_ID].nunique().reset_index(name='Chats')
+        f = px.area(dh, x='hora_30m', y='Chats', markers=True, color_discrete_sequence=['#157347'],
+                    title=f"Carga por Franja Horaria ({HORARIO_TXT} hs)")
+        f.update_traces(marker=dict(size=7, color='#0F5132'), line=dict(color='#0F5132', width=2),
+                        fillcolor='rgba(21,115,71,0.18)')
+        _tema_pdf(f, 400, inf=95)
+        f.update_layout(xaxis_title="Franja de 30 minutos", yaxis_title="Conversaciones",
+                        xaxis=dict(tickangle=-45))
+        items.append(_item("A qué hora del día llega la demanda",
+                           "Conversaciones acumuladas del período por franja de media hora. Marca dónde "
+                           "poner gente: el pico define la dotación mínima y los valles, el margen para "
+                           "tareas que no son atención.", f, ratio=0.235))
+
+    # 3 · Mapa de calor
+    dhm = d[(d['hora'] >= HORA_GRAF_INI) & (d['hora'] <= HORA_GRAF_FIN) &
+            (~d['dia_semana'].isin(['Sábado', 'Domingo']))]
+    if not dhm.empty:
+        hc = dhm.groupby(['dia_semana', 'hora'])[COL_ID].nunique().reset_index(name='Chats')
+        horas = list(range(HORA_GRAF_INI, HORA_GRAF_FIN + 1))
+        pv = hc.pivot(index='dia_semana', columns='hora', values='Chats').reindex(
+            index=DAY_ORDER_LABORAL, columns=horas).fillna(0)
+        z = pv.values
+        zmax = z.max() if z.max() > 0 else 1
+        xs = [f"{h:02d}h" for h in horas]
+        f = go.Figure(go.Heatmap(z=z, x=xs, y=list(pv.index), colorscale=BDI_HEATSCALE,
+                                 xgap=4, ygap=4, zmin=0, zmax=zmax,
+                                 colorbar=dict(title=dict(text="Chats", font=dict(size=13)),
+                                               thickness=14, len=0.8, outlinewidth=0)))
+        anns = []
+        for i, dia in enumerate(pv.index):
+            for j, h in enumerate(horas):
+                v = z[i][j]
+                if v:
+                    anns.append(dict(x=xs[j], y=dia, text=f"<b>{int(v)}</b>", showarrow=False,
+                                     font=dict(color='#FFFFFF' if v / zmax > 0.6 else '#14382A', size=13)))
+        f.update_layout(annotations=anns,
+                        title=dict(text="Concentración de Conversaciones por Día y Hora",
+                                   font=dict(color='#0F5132', size=19), x=0.01))
+        _tema_pdf(f, 420, izq=110, inf=40)
+        f.update_xaxes(side='top', showgrid=False, ticks='', title=None,
+                       tickfont=dict(color='#0F5132', size=14))
+        f.update_yaxes(showgrid=False, autorange='reversed', ticks='', title=None,
+                       tickfont=dict(color='#0F5132', size=15))
+        f.update_layout(plot_bgcolor='#FBFDFC')
+        pico = hc.loc[hc['Chats'].idxmax()]
+        items.append(_item("Los días y horas que más aprietan",
+                           f"Cruce de día de semana y hora. El pico del período fue {pico['dia_semana']} "
+                           f"a las {int(pico['hora']):02d}:00 con {int(pico['Chats'])} conversaciones. "
+                           "Las celdas más oscuras son las franjas que no pueden quedar descubiertas.",
+                           f, ratio=0.235))
+
+    # 4 · Composición mensual por asesor
+    comp = d.groupby(['periodo', 'user'])[COL_ID].nunique().reset_index(name='Chats')
+    if not comp.empty:
+        comp['Pct'] = comp['Chats'] / comp.groupby('periodo')['Chats'].transform('sum') * 100
+        orden_u = comp.groupby('user')['Chats'].sum().sort_values(ascending=False).index.tolist()
+        px_ord = [p for p in periodos_orden if p in set(comp['periodo'])]
+        f = go.Figure()
+        for asesor in orden_u:
+            g = comp[comp['user'] == asesor].set_index('periodo').reindex(px_ord)
+            ch, pc = g['Chats'].fillna(0), g['Pct'].fillna(0)
+            txt = [f"{asesor}<br>{int(c)} · {p:.0f}%" if p >= 7 else "" for c, p in zip(ch, pc)]
+            f.add_bar(x=px_ord, y=ch, name=asesor, text=txt,
+                      marker=dict(color=USER_COLORS.get(asesor), line=dict(color='#FFFFFF', width=1.5)),
+                      textposition='inside', insidetextanchor='middle',
+                      textfont=dict(color='#FFFFFF', size=13))
+        f.update_layout(barmode='stack', bargap=0.18,
+                        title=dict(text="Reparto de la Carga entre Asesores, Mes a Mes",
+                                   font=dict(color='#0F5132', size=19), x=0.01))
+        _tema_pdf(f, 520, leyenda=True, inf=120)
+        f.update_layout(xaxis_title="", yaxis_title="Conversaciones", xaxis=dict(tickangle=-25))
+        items.append(_item("Quién sostiene el volumen cada mes",
+                           "Cada barra es el mes completo, partido por asesor, con cantidad y peso "
+                           "relativo. Las porciones sin número pesan menos del 7% y se omiten para que "
+                           "no se amontone el texto. Muestra si la carga se reparte o depende de una "
+                           "sola persona.", f, ratio=0.235))
+
+    # 5 · Rendimiento por asesor (tabla)
+    mu = metricas_usuario_linea(d)
+    if not mu.empty:
+        tabla = mu[['user', 'Chats', '% de la Línea', 'Chats/Día', 'Contactos', 'Chats/Contacto',
+                    'FRT_Mediano', 'FRT_p90', 'Resolucion_Mediana']].rename(columns={
+            'user': 'Asesor', '% de la Línea': '% del total', 'Chats/Contacto': 'Chats/cliente',
+            'FRT_Mediano': 'FRT med. (min)', 'FRT_p90': 'FRT p90 (min)',
+            'Resolucion_Mediana': 'Resolución med. (min)'})
+        items.append({'tipo': 'tabla', 'titulo': "Rendimiento individual",
+                      'desc': "Volumen, ritmo diario y velocidad de cada asesor dentro de esta línea. "
+                              "La mediana dice cómo responde habitualmente; el p90, cuánto espera el "
+                              "10% peor atendido. Una mediana baja con p90 alto señala conversaciones "
+                              "que quedan dormidas, no lentitud general.", 'obj': tabla})
+
+        comp_p = mu.melt(id_vars='user', value_vars=['FRT_Mediano', 'FRT_p90'],
+                         var_name='Métrica', value_name='Minutos')
+        comp_p['Métrica'] = comp_p['Métrica'].map({'FRT_Mediano': 'Mediana', 'FRT_p90': 'p90 (la cola)'})
+        f = px.bar(comp_p, x='Minutos', y='user', color='Métrica', orientation='h', barmode='group',
+                   color_discrete_map={'Mediana': '#157347', 'p90 (la cola)': '#C9A227'},
+                   title="Velocidad de Respuesta: Habitual vs. Cola")
+        f.update_traces(texttemplate='%{x:.0f}', textposition='outside', cliponaxis=False,
+                        textfont=dict(size=13))
+        _tema_pdf(f, 400, leyenda=True, izq=110, inf=110)
+        f.update_layout(xaxis_title="Minutos de jornada laboral", yaxis_title="")
+        items.append(_item("Quién contesta rápido y a quién se le acumula",
+                           "Dos barras por asesor: la mediana de su primera respuesta y su p90. Cuanto "
+                           "más separadas, más dispar es su atención. Medido en minutos de jornada, así "
+                           "que un chat de las 20:00 no penaliza a nadie.", f, ratio=0.235))
+
+    # 6 · Semáforo
+    tr = d['FRT_min'].apply(clasificar_tramo).value_counts().reindex(ORDEN_TRAMOS).fillna(0).reset_index()
+    tr.columns = ['Tramo', 'Chats']
+    total_tr = tr['Chats'].sum()
+    tr['Texto'] = tr.apply(lambda r: f"{int(r['Chats'])} ({r['Chats']/total_tr*100:.0f}%)" if total_tr else "", axis=1)
+    f = px.bar(tr[::-1], x='Chats', y='Tramo', orientation='h', text='Texto', color='Tramo',
+               color_discrete_map=TRAMO_COLORS, category_orders={'Tramo': ORDEN_TRAMOS[::-1]},
+               title="Tiempo hasta la Primera Respuesta")
+    f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
+    _tema_pdf(f, 380, izq=170)
+    f.update_layout(xaxis_title="Conversaciones", yaxis_title="")
+    items.append(_item("Cuán rápido se contesta, en tramos",
+                       "La mediana esconde la cola, así que acá se ve la distribución completa. El tramo "
+                       "de más de 60 minutos es el que conviene mirar: son conversaciones que el cliente "
+                       "ya percibió como demora.", f, ratio=0.235))
+
+    # 7 · Patrimonio por asesor
+    fp = fig_patrimonio_por_asesor(d, para_pdf=True)
+    if fp is not None:
+        fp.update_layout(margin=dict(t=80, b=80, l=40, r=40))
+        items.append(_item("Qué patrimonio atiende cada uno",
+                           "Una torta por asesor con la cantidad de chats y el peso de cada segmento "
+                           "dentro de su cartera. Permite ver quién concentra clientes grandes y quién "
+                           "absorbe volumen de tickets chicos, que es una carga distinta.",
+                           fp, ratio=fp.layout.height / 1400.0))
+
+    # 8 · Brokers y segmentos (tortas, media página cada una)
+    dexp = d.explode('brokers')
+    dexp = dexp[dexp['brokers'].notna()]
+    if not dexp.empty:
+        bu = dexp.drop_duplicates(subset=['contactNumber', 'brokers'])['brokers'].value_counts().reset_index()
+        bu.columns = ['Broker', 'Personas']
+        f = px.pie(bu, values='Personas', names='Broker', hole=0.45, color='Broker',
+                   color_discrete_map=BROKER_COLORS, title="Personas Únicas por Broker")
+        f.update_traces(texttemplate='%{value}<br>%{percent}', textposition='inside',
+                        textfont=dict(size=14, color='#FFFFFF'),
+                        marker=dict(line=dict(color='#FFFFFF', width=2)))
+        _tema_pdf(f, 420, leyenda=True, izq=30, inf=90)
+        items.append(_item("Con qué brokers opera la cartera",
+                           "Personas distintas atendidas por broker, no cantidad de chats: evita que un "
+                           "cliente muy conversador distorsione el peso de su plataforma.",
+                           f, ancho='medio', ratio=0.52))
+
+    dt = d[d['tier'] != 'Sin Etiqueta Monto']
+    if not dt.empty:
+        tu = dt.drop_duplicates(subset=['contactNumber', 'tier'])['tier'].value_counts().reindex(TIERS).dropna().reset_index()
+        tu.columns = ['Segmento', 'Personas']
+        f = px.pie(tu, values='Personas', names='Segmento', hole=0.45, color='Segmento',
+                   color_discrete_map=TIER_COLORS, category_orders={'Segmento': TIERS},
+                   title="Personas Únicas por Segmento Patrimonial")
+        f.update_traces(texttemplate='%{value}<br>%{percent}', textposition='inside',
+                        textfont=dict(size=14, color='#FFFFFF'),
+                        marker=dict(line=dict(color='#FFFFFF', width=2)))
+        _tema_pdf(f, 420, leyenda=True, izq=30, inf=110)
+        items.append(_item("Cómo se reparte el patrimonio de la base",
+                           "Clientes distintos por tramo de monto declarado. Es el mapa de a quién se "
+                           "está atendiendo, independiente de cuánto escriba cada uno.",
+                           f, ancho='medio', ratio=0.52))
+
+    # 9 · Fricción y SLA
+    if not dexp.empty:
+        fr = dexp.groupby('brokers').agg(Chats=(COL_ID, 'nunique'),
+                                         Usuarios=('contactNumber', 'nunique')).reset_index()
+        fr['Ratio'] = fr['Chats'] / fr['Usuarios']
+        f = px.bar(fr.sort_values('Ratio'), x='Ratio', y='brokers', orientation='h', text='Ratio',
+                   color='brokers', color_discrete_map=BROKER_COLORS,
+                   title="Conversaciones por Cliente, según Broker")
+        f.update_traces(texttemplate='%{text:.2f}', textposition='outside', cliponaxis=False,
+                        textfont=dict(size=14))
+        _tema_pdf(f, 360, izq=110)
+        f.update_layout(xaxis_title="Chats por cliente único", yaxis_title="")
+        items.append(_item("Qué plataforma genera más consultas por cliente",
+                           "Chats divididos clientes únicos de cada broker. Un ratio alto significa que "
+                           "ese cliente vuelve más veces: suele indicar fricción operativa de la "
+                           "plataforma, y se ataca con instructivos o soporte, no con más asesores.",
+                           f, ancho='medio', ratio=0.52))
+
+    if not dt.empty:
+        sla = dt.groupby('tier')['FRT_min'].median().reindex(TIERS).dropna().reset_index()
+        f = px.bar(sla, x='FRT_min', y='tier', orientation='h', text='FRT_min', color='tier',
+                   color_discrete_map=TIER_COLORS, category_orders={'tier': TIERS},
+                   title="Tiempo de Respuesta según Patrimonio")
+        f.update_traces(texttemplate='%{text:.1f} min', textposition='outside', cliponaxis=False,
+                        textfont=dict(size=14))
+        _tema_pdf(f, 360, izq=150)
+        f.update_layout(xaxis_title="Minutos de jornada (mediana)", yaxis_title="")
+        items.append(_item("A quién se le contesta primero",
+                           "Mediana de primera respuesta por tramo de patrimonio. Es el SLA real, el que "
+                           "surge de la práctica y no del manual. Si los segmentos altos esperan más que "
+                           "los bajos, hay una prioridad invertida.", f, ancho='medio', ratio=0.52))
+
+    # 10 · Top clientes
+    top = d.groupby('contactName')[COL_ID].nunique().reset_index(name='Chats')
+    top = top.sort_values('Chats', ascending=False).head(12).sort_values('Chats')
+    if not top.empty:
+        top['Nombre'] = _acortar(top['contactName'], 30)
+        f = px.bar(top, x='Chats', y='Nombre', orientation='h', text='Chats',
+                   color_discrete_sequence=['#157347'], title="Clientes con Más Conversaciones")
+        f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
+        _tema_pdf(f, 460, izq=230)
+        f.update_layout(xaxis_title="Conversaciones", yaxis_title="")
+        items.append(_item("Los clientes que más demandan atención",
+                           "Top 12 por cantidad de conversaciones en el período. Útil para detectar "
+                           "cuentas que consumen tiempo desproporcionado respecto de lo que aportan, y "
+                           "para decidir si conviene un canal distinto para ellas.", f, ratio=0.235))
+
+    return items
+
+def figuras_comercial(d, linea, df_historia):
+    """Bloque comercial, calculado sobre `d` (ya filtrado a la línea comercial)."""
+    items = []
+    leads = analizar_captacion(d, df_historia, linea)
+    if leads.empty:
+        return items
+
+    total = len(leads)
+    es_cli = ((leads['Desenlace'] == DES_CLIENTE) | (leads['Estado'] == 'Ya era cliente'))
+    n_cli = int(es_cli.sum())
+    nv = leads[~es_cli]
+    n_leads = len(nv)
+    n_mem = int((nv['Desenlace'] == DES_MEMBRESIA).sum())
+    n_con = int((nv['Desenlace'] == DES_CONSULTORIA).sum())
+    n_der = int((nv['Desenlace'] == DES_DERIVADO).sum())
+    n_nc = int((nv['Desenlace'] == DES_NO_CALIFICA).sum())
+    n_ep = int((nv['Desenlace'] == DES_EN_PROCESO).sum())
+    n_sd = int((nv['Desenlace'] == DES_SIN_DEFINIR).sum())
+    ganados = n_mem + n_con + n_der
+    conv = ganados / n_leads * 100 if n_leads else np.nan
+
+    items.append({'tipo': 'kpis', 'titulo': f"Resultado comercial · {linea}",
+                  'desc': "La unidad es el contacto único, no la conversación: en captación la persona "
+                          "escribe una vez y no vuelve. La tasa de conversión se calcula sobre leads "
+                          "reales, descontando a quienes ya eran clientes.",
+                  'obj': [("Escribieron", f"{total:,}"), ("Ya eran clientes", f"{n_cli:,}"),
+                          ("Leads reales", f"{n_leads:,}"), ("Leads ganados", f"{ganados:,}"),
+                          ("Tasa de conversión", f"{conv:.1f}%" if pd.notna(conv) else "s/d"),
+                          ("Membresías", f"{n_mem:,}"), ("Consultorías", f"{n_con:,}"),
+                          ("Derivados", f"{n_der:,}"), ("No aplica", f"{n_nc:,}"),
+                          ("En proceso", f"{n_ep:,}"), ("Sin definir", f"{n_sd:,}"),
+                          ("FRT p90", f"{nv['FRT_min'].quantile(0.9):.0f} min" if nv['FRT_min'].notna().any() else "s/d")]})
+
+    # Embudo
+    ys = ['3 · Leads ganados', '2 · Leads reales', '1 · Escribieron al comercial']
+    anchos = [ganados, n_leads, total]
+    amax = max(total, 1)
+    pc = lambda v, b: f"{v/b*100:.0f}%" if b else "s/d"
+    f = go.Figure()
+    f.add_bar(y=ys, x=[(amax - a) / 2 for a in anchos], orientation='h',
+              marker=dict(color='rgba(0,0,0,0)'), showlegend=False, hoverinfo='skip')
+    f.add_bar(y=ys, x=[0, n_leads, total], orientation='h',
+              marker=dict(color=['rgba(0,0,0,0)', COLOR_ETAPA_2, COLOR_ETAPA_1],
+                          line=dict(color='#FFFFFF', width=2)),
+              text=['', f"{n_leads} leads reales · {pc(n_leads, total)}", f"{total} contactos únicos"],
+              textposition='inside', insidetextanchor='middle',
+              textfont=dict(color='#FFFFFF', size=16), showlegend=False)
+    for et, val in [(DES_MEMBRESIA, n_mem), (DES_CONSULTORIA, n_con), (DES_DERIVADO, n_der)]:
+        corto = et.split(' - ')[0].split(' a ')[0]
+        f.add_bar(y=ys, x=[val, 0, 0], orientation='h', name=et,
+                  marker=dict(color=DESENLACE_COLORS[et], line=dict(color='#FFFFFF', width=2)),
+                  text=[f"{corto}<br>{val} · {pc(val, n_leads)}" if val else '', '', ''],
+                  textposition='inside', insidetextanchor='middle',
+                  textfont=dict(color='#FFFFFF', size=14))
+    f.update_layout(barmode='stack', bargap=0.3,
+                    title=dict(text=f"Embudo Comercial · {linea}",
+                               font=dict(color='#0F5132', size=19), x=0.01))
+    _tema_pdf(f, 400, leyenda=True, izq=230, inf=120)
+    f.update_layout(xaxis=dict(visible=False, range=[0, amax * 1.02]),
+                    yaxis=dict(showgrid=False, tickfont=dict(color='#0F5132', size=15),
+                               categoryorder='array', categoryarray=ys))
+    for fila, cant, txt, col in [('2 · Leads reales', n_cli, 'ya eran clientes', '#8A6D00'),
+                                 ('3 · Leads ganados', n_leads - ganados, 'sin cerrar', '#7A867F')]:
+        if cant:
+            f.add_annotation(xref='paper', x=1.015, y=fila, xanchor='left', yanchor='middle',
+                             text=f"<b>−{cant}</b><br><span style='font-size:12px'>{txt}</span>",
+                             showarrow=False, align='left', font=dict(color=col, size=14))
+    f.update_layout(margin=dict(t=64, b=120, l=230, r=170))
+    items.append(_item("Del primer mensaje a la venta",
+                       "Tres escalones: todo lo que entró, lo que era lead de verdad y lo que se ganó. "
+                       "El último se abre en las tres formas de ganarlo — membresía, consultoría o "
+                       "derivación a un asesor. A la derecha, lo que se cae en cada paso.", f, ratio=0.235))
+
+    # Conciliación
+    cats = [(DES_MEMBRESIA, n_mem), (DES_CONSULTORIA, n_con), (DES_DERIVADO, n_der),
+            (DES_NO_CALIFICA, n_nc), (DES_EN_PROCESO, n_ep), (DES_SIN_DEFINIR, n_sd)]
+    f = go.Figure()
+    for et, val in cats:
+        if not val:
+            continue
+        p = val / n_leads * 100 if n_leads else 0
+        f.add_bar(y=['Leads reales'], x=[val], orientation='h', name=et,
+                  marker=dict(color=DESENLACE_COLORS[et], line=dict(color='#FFFFFF', width=2)),
+                  text=[f"{val}<br>{p:.0f}%"], textposition='inside', insidetextanchor='middle',
+                  textfont=dict(color='#FFFFFF' if et != DES_SIN_DEFINIR else '#14382A', size=14))
+    f.update_layout(barmode='stack', bargap=0.65,
+                    title=dict(text=f"Desglose Completo de los {n_leads} Leads Reales",
+                               font=dict(color='#0F5132', size=19), x=0.01))
+    _tema_pdf(f, 300, leyenda=True, izq=40, inf=110)
+    f.update_layout(xaxis=dict(visible=False), yaxis=dict(showticklabels=False, showgrid=False))
+    items.append(_item("En qué terminó cada lead",
+                       "El hueco entre leads y ganados no es una sola cosa. «No aplica» es un descarte "
+                       "decidido, «En proceso» una charla abierta y «Sin definir» un desenlace que nadie "
+                       "registró. Solo el tercero es un problema de gestión. Cuando llegue a cero, la "
+                       "conversión del embudo deja de ser un piso y pasa a ser el número real.",
+                       f, ratio=0.235))
+
+    # Semáforo de leads
+    tr = nv['Tramo'].value_counts().reindex(ORDEN_TRAMOS).fillna(0).reset_index()
+    tr.columns = ['Tramo', 'Leads']
+    f = px.bar(tr[::-1], x='Leads', y='Tramo', orientation='h', color='Tramo',
+               text=[f"{int(v)} ({v/n_leads*100:.0f}%)" if n_leads else "" for v in tr['Leads'][::-1]],
+               color_discrete_map=TRAMO_COLORS, category_orders={'Tramo': ORDEN_TRAMOS[::-1]},
+               title="Tiempo hasta Contestarle a un Lead")
+    f.update_traces(textposition='outside', cliponaxis=False, textfont=dict(size=14))
+    _tema_pdf(f, 380, izq=170)
+    f.update_layout(xaxis_title="Leads", yaxis_title="")
+    items.append(_item("Cuánto espera un prospecto antes de que le contesten",
+                       "En captación la velocidad pesa más que en cartera: el prospecto todavía no "
+                       "tiene relación con nosotros y está comparando. Cada tramo que se corre hacia "
+                       "abajo es conversión que se pierde sin dejar rastro.", f, ratio=0.235))
+
+    # Flujo diario
+    pd_ = nv.groupby(['fecha', 'Desenlace']).size().reset_index(name='Leads')
+    if not pd_.empty:
+        f = px.bar(pd_, x='fecha', y='Leads', color='Desenlace', color_discrete_map=DESENLACE_COLORS,
+                   category_orders={'Desenlace': DESENLACES}, title="Leads que Entran, Día por Día")
+        _tema_pdf(f, 400, leyenda=True, inf=110)
+        f.update_layout(barmode='stack', xaxis_title="", yaxis_title="Leads")
+        items.append(_item("El ritmo diario de entrada",
+                           "Leads nuevos por día, coloreados por cómo terminaron. Sirve para ver si la "
+                           "captación es pareja o depende de picos puntuales, y si los días de más "
+                           "volumen son también los de peor cierre.", f, ancho='medio', ratio=0.52))
+
+    # Hora de entrada vs demora
+    ph = nv.groupby('hora_ingreso').agg(Leads=('contactNumber', 'count'),
+                                        FRT=('FRT_min', 'median')).reset_index()
+    if not ph.empty:
+        f = go.Figure()
+        f.add_bar(x=ph['hora_ingreso'], y=ph['Leads'], name='Leads que entran', marker_color='#8FBF74')
+        f.add_scatter(x=ph['hora_ingreso'], y=ph['FRT'], name='Demora mediana (min)', yaxis='y2',
+                      mode='lines+markers', line=dict(color='#C9A227', width=3), marker=dict(size=8))
+        f.update_layout(title=dict(text="Hora de Entrada vs. Demora en Responder",
+                                   font=dict(color='#0F5132', size=19), x=0.01))
+        _tema_pdf(f, 400, leyenda=True, inf=110, izq=60)
+        f.update_layout(xaxis=dict(title="Hora del día", dtick=1),
+                        yaxis=dict(title="Leads"),
+                        yaxis2=dict(title="Minutos", overlaying='y', side='right', showgrid=False,
+                                    title_font=dict(color='#8A6D00'), tickfont=dict(color='#8A6D00')))
+        items.append(_item("Las ventanas horarias sin cobertura",
+                           "Barras: cuántos leads entran en cada hora. Línea dorada: cuánto tardan en "
+                           "recibir respuesta. Donde la barra es alta y la línea también, hay demanda "
+                           "llegando a una hora en la que nadie está mirando.", f, ancho='medio', ratio=0.52))
+
+    # Tabla por asesor
+    pa = nv.groupby('Asesor').agg(
+        Leads=('contactNumber', 'nunique'),
+        FRT_Mediano=('FRT_min', 'median'),
+        FRT_p90=('FRT_min', lambda s: s.quantile(0.9)),
+        Membresias=('Desenlace', lambda s: int((s == DES_MEMBRESIA).sum())),
+        Consultorias=('Desenlace', lambda s: int((s == DES_CONSULTORIA).sum())),
+        Derivados=('Desenlace', lambda s: int((s == DES_DERIVADO).sum())),
+        No_Califica=('Desenlace', lambda s: int((s == DES_NO_CALIFICA).sum())),
+        En_Proceso=('Desenlace', lambda s: int((s == DES_EN_PROCESO).sum())),
+        Sin_Definir=('Desenlace', lambda s: int((s == DES_SIN_DEFINIR).sum())),
+    ).reset_index()
+    pa['Ganados'] = pa['Membresias'] + pa['Consultorias'] + pa['Derivados']
+    pa['% Conv.'] = np.where(pa['Leads'] > 0, pa['Ganados'] / pa['Leads'] * 100, np.nan)
+    pa = pa.sort_values('Leads', ascending=False)
+    items.append({'tipo': 'tabla', 'titulo': "Rendimiento por asesor en la línea comercial",
+                  'desc': "Cuántos leads tomó cada uno, cuán rápido contestó y en qué terminaron. "
+                          "Una columna «Sin definir» alta no dice que ese asesor venda poco: dice que "
+                          "no está cerrando el registro, y hasta que lo haga su conversión no es "
+                          "comparable con la de los demás.",
+                  'obj': pa[['Asesor', 'Leads', 'FRT_Mediano', 'FRT_p90', 'Membresias', 'Consultorias',
+                             'Derivados', 'Ganados', '% Conv.', 'No_Califica', 'En_Proceso',
+                             'Sin_Definir']].rename(columns={
+                      'FRT_Mediano': 'FRT med.', 'FRT_p90': 'FRT p90', 'Membresias': 'Memb.',
+                      'Consultorias': 'Consult.', 'No_Califica': 'No aplica',
+                      'En_Proceso': 'En proceso', 'Sin_Definir': 'Sin definir'})})
+    return items
+
+
+def _fig_a_png(fig, ancho_px, alto_px):
+    """kaleido 0.2.1 trae su propio chromium: no depende de que haya navegador."""
+    return fig.to_image(format='png', width=int(ancho_px), height=int(alto_px), scale=2)
+
+def construir_pdf(bloques, titulo, subtitulo, meta):
+    """A4 apaisado. El layout se calcula a mano: cada gráfico declara si ocupa toda
+    la página o media, y los de media se emparejan de a dos. Así no quedan hojas
+    con un solo gráfico y medio metro de blanco debajo."""
     from reportlab.lib.pagesizes import A4, landscape
     from reportlab.lib.units import mm
     from reportlab.lib import colors
     from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.enums import TA_LEFT
+    from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY
     from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Image,
-                                    Table, PageBreak, KeepTogether)
+                                    Table, TableStyle, PageBreak, KeepTogether)
 
-    buffer = io.BytesIO()
-    ancho_pag, alto_pag = landscape(A4)
-    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4),
-                            leftMargin=14 * mm, rightMargin=14 * mm,
-                            topMargin=16 * mm, bottomMargin=14 * mm,
+    buf = io.BytesIO()
+    W, H = landscape(A4)
+    MG = 13 * mm
+    doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=MG, rightMargin=MG,
+                            topMargin=17 * mm, bottomMargin=13 * mm,
                             title=titulo, author="BDI Consultora")
-    util = ancho_pag - 28 * mm
+    util = W - 2 * MG
+    medio = (util - 8 * mm) / 2
 
-    base = getSampleStyleSheet()
-    H1 = ParagraphStyle('H1', parent=base['Title'], fontName='Helvetica-Bold', fontSize=22,
-                        textColor=colors.HexColor('#0F5132'), alignment=TA_LEFT, spaceAfter=2)
-    SUB = ParagraphStyle('SUB', parent=base['Normal'], fontSize=10.5,
-                         textColor=colors.HexColor('#5B6E67'), spaceAfter=10)
-    H2 = ParagraphStyle('H2', parent=base['Heading2'], fontName='Helvetica-Bold', fontSize=14,
-                        textColor=colors.HexColor('#0F5132'), spaceBefore=8, spaceAfter=6)
-    H3 = ParagraphStyle('H3', parent=base['Heading3'], fontName='Helvetica-Bold', fontSize=11,
-                        textColor=colors.HexColor('#157347'), spaceBefore=6, spaceAfter=4)
-    TXT = ParagraphStyle('TXT', parent=base['Normal'], fontSize=9,
-                         textColor=colors.HexColor('#3F4F49'), spaceAfter=4)
+    S = getSampleStyleSheet()
+    H1 = ParagraphStyle('H1', parent=S['Title'], fontName='Helvetica-Bold', fontSize=23,
+                        textColor=colors.HexColor('#0F5132'), alignment=TA_LEFT,
+                        spaceAfter=3, leading=27)
+    SUB = ParagraphStyle('SUB', parent=S['Normal'], fontSize=9.5, leading=13,
+                         textColor=colors.HexColor('#5B6E67'), spaceAfter=14)
+    H2 = ParagraphStyle('H2', parent=S['Heading2'], fontName='Helvetica-Bold', fontSize=15,
+                        textColor=colors.white, spaceBefore=0, spaceAfter=0, leading=19)
+    TIT = ParagraphStyle('TIT', parent=S['Heading3'], fontName='Helvetica-Bold', fontSize=12,
+                         textColor=colors.HexColor('#0F5132'), spaceBefore=0, spaceAfter=2, leading=15)
+    DESC = ParagraphStyle('DESC', parent=S['Normal'], fontSize=8.3, leading=11.2,
+                          textColor=colors.HexColor('#5B6E67'), spaceAfter=5, alignment=TA_JUSTIFY)
 
-    def cabecera(canvas, doc_):
-        canvas.saveState()
-        canvas.setFillColor(colors.HexColor('#0F5132'))
-        canvas.rect(0, alto_pag - 10 * mm, ancho_pag, 10 * mm, stroke=0, fill=1)
-        canvas.setFillColor(colors.white)
-        canvas.setFont('Helvetica-Bold', 9)
-        canvas.drawString(14 * mm, alto_pag - 7 * mm, "BDI CONSULTORA · Dashboard de Mensajería")
-        canvas.drawRightString(ancho_pag - 14 * mm, alto_pag - 7 * mm, titulo)
-        canvas.setFillColor(colors.HexColor('#8A9A93'))
-        canvas.setFont('Helvetica', 7.5)
-        canvas.drawString(14 * mm, 8 * mm, meta)
-        canvas.drawRightString(ancho_pag - 14 * mm, 8 * mm, f"Página {doc_.page}")
-        canvas.restoreState()
+    def banda(texto):
+        t = Table([[Paragraph(texto, H2)]], colWidths=[util], rowHeights=[9 * mm])
+        t.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#0F5132')),
+            ('LEFTPADDING', (0, 0), (-1, -1), 8), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+        return t
+
+    def encabezado(c, d_):
+        c.saveState()
+        c.setFillColor(colors.HexColor('#0F5132'))
+        c.rect(0, H - 9 * mm, W, 9 * mm, stroke=0, fill=1)
+        c.setFillColor(colors.white); c.setFont('Helvetica-Bold', 8.5)
+        c.drawString(MG, H - 6.2 * mm, "BDI CONSULTORA · Dashboard de Mensajería")
+        c.drawRightString(W - MG, H - 6.2 * mm, titulo)
+        c.setStrokeColor(colors.HexColor('#DDE5E1')); c.setLineWidth(0.5)
+        c.line(MG, 10 * mm, W - MG, 10 * mm)
+        c.setFillColor(colors.HexColor('#8A9A93')); c.setFont('Helvetica', 7)
+        c.drawString(MG, 6.5 * mm, meta)
+        c.drawRightString(W - MG, 6.5 * mm, f"Página {d_.page}")
+        c.restoreState()
+
+    def img(item, ancho_pt):
+        alto_pt = ancho_pt * item['ratio']
+        png = _fig_a_png(item['obj'], 1450, 1450 * item['ratio'])
+        return Image(io.BytesIO(png), width=ancho_pt, height=alto_pt)
+
+    def partes(item, ancho_pt):
+        """Título + explicación + gráfico. Como lista plana, porque un KeepTogether
+        adentro de una celda de tabla reporta altura infinita y rompe el layout."""
+        return [Paragraph(item['titulo'], TIT), Paragraph(item['desc'], DESC),
+                img(item, ancho_pt)]
+
+    def celda(item, ancho_pt):
+        """Para gráficos a ancho completo: se mantiene unido título, texto y figura."""
+        return KeepTogether(partes(item, ancho_pt) + [Spacer(1, 7)])
+
+    def tabla_kpi(pares, ancho_pt, cols=None):
+        # Con muchos indicadores conviene 6 columnas: entran en dos filas y dejan
+        # lugar para que el primer gráfico comparta la página.
+        cols = cols or (6 if len(pares) > 8 else 4)
+        datos, fila = [], []
+        for et, val in pares:
+            fila.append(Paragraph(
+                f"<font size=6.2 color='#5B6E67'>{et.upper()}</font><br/>"
+                f"<font size=13 color='#0F5132'><b>{val}</b></font>", DESC))
+            if len(fila) == cols:
+                datos.append(fila); fila = []
+        if fila:
+            fila += [''] * (cols - len(fila)); datos.append(fila)
+        t = Table(datos, colWidths=[ancho_pt / cols] * cols)
+        t.setStyle(TableStyle([
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#DDE5E1')),
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FBFDFC')),
+            ('TOPPADDING', (0, 0), (-1, -1), 6), ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+            ('LEFTPADDING', (0, 0), (-1, -1), 9), ('VALIGN', (0, 0), (-1, -1), 'MIDDLE')]))
+        return t
+
+    def tabla_datos(dfv, ancho_pt):
+        dfv = dfv.copy()
+        for c in dfv.columns:
+            if pd.api.types.is_float_dtype(dfv[c]):
+                dfv[c] = dfv[c].map(lambda v: '—' if pd.isna(v) else f"{v:,.1f}")
+        cab = ParagraphStyle('cab', parent=S['Normal'], fontSize=7.4, leading=9,
+                             textColor=colors.white, fontName='Helvetica-Bold', alignment=1)
+        datos = [[Paragraph(str(c), cab) for c in dfv.columns]] + dfv.astype(str).values.tolist()
+        n = len(dfv.columns)
+        anchos = [ancho_pt * 0.16] + [(ancho_pt * 0.84) / (n - 1)] * (n - 1) if n > 1 else [ancho_pt]
+        t = Table(datos, repeatRows=1, colWidths=anchos)
+        estilo = [('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0F5132')),
+                  ('FONTSIZE', (0, 1), (-1, -1), 8),
+                  ('ALIGN', (1, 0), (-1, -1), 'CENTER'), ('ALIGN', (0, 1), (0, -1), 'LEFT'),
+                  ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                  ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#DDE5E1')),
+                  ('TOPPADDING', (0, 0), (-1, -1), 5), ('BOTTOMPADDING', (0, 0), (-1, -1), 5)]
+        for i in range(1, len(datos)):
+            if i % 2 == 0:
+                estilo.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor('#F4F9F6')))
+        t.setStyle(TableStyle(estilo))
+        return t
+
+    # ---- Paginado explícito.
+    # Se estima el alto de cada elemento y se corta de página cuando no entra, en vez
+    # de delegar en KeepTogether, que es conservador y dejaba medias hojas vacías.
+    FRAME = H - doc.topMargin - doc.bottomMargin
+    ALTO_TITULO, ALTO_DESC, ALTO_BANDA = 17, 34, 36
 
     hist = [Paragraph(titulo, H1), Paragraph(subtitulo, SUB)]
+    restante = FRAME - 74                      # lo que ocupa la portada
 
-    for nombre_seccion, items in secciones:
+    def alto_de(item, ancho_pt):
+        if item['tipo'] == 'kpis':
+            cols_kpi = 6 if len(item['obj']) > 8 else 4
+            return ALTO_TITULO + ALTO_DESC + int(np.ceil(len(item['obj']) / cols_kpi)) * 35 + 12
+        if item['tipo'] == 'tabla':
+            return ALTO_TITULO + ALTO_DESC + (len(item['obj']) + 1) * 22 + 12
+        return ALTO_TITULO + ALTO_DESC + ancho_pt * item['ratio'] + 10
+
+    for nombre, items in bloques:
         if not items:
             continue
-        hist.append(Paragraph(nombre_seccion, H2))
-        for item in items:
-            if item['tipo'] == 'kpis':
-                datos, fila = [], []
-                for etiqueta, valor in item['obj']:
-                    fila.append(Paragraph(
-                        f"<font size=7 color='#5B6E67'>{etiqueta.upper()}</font><br/>"
-                        f"<font size=13 color='#0F5132'><b>{valor}</b></font>", TXT))
-                    if len(fila) == 4:
-                        datos.append(fila); fila = []
-                if fila:
-                    fila += [''] * (4 - len(fila)); datos.append(fila)
-                t = Table(datos, colWidths=[util / 4] * 4)
-                t.setStyle(_estilo_tabla(0))
-                t.setStyle(__import__('reportlab.platypus', fromlist=['TableStyle']).TableStyle([
-                    ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor('#DDE5E1')),
-                    ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#FBFDFC')),
-                    ('TOPPADDING', (0, 0), (-1, -1), 6), ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-                    ('LEFTPADDING', (0, 0), (-1, -1), 8),
-                ]))
-                hist.append(KeepTogether([Paragraph(item['titulo'], H3), t, Spacer(1, 6)]))
-            elif item['tipo'] == 'tabla':
-                dfv = item['obj'].copy()
-                for c in dfv.columns:
-                    if pd.api.types.is_float_dtype(dfv[c]):
-                        dfv[c] = dfv[c].map(lambda v: '' if pd.isna(v) else f"{v:,.1f}")
-                datos = [list(dfv.columns)] + dfv.astype(str).values.tolist()
-                t = Table(datos, repeatRows=1, colWidths=[util / len(dfv.columns)] * len(dfv.columns))
-                t.setStyle(_estilo_tabla(len(datos)))
-                hist.append(KeepTogether([Paragraph(item['titulo'], H3), t, Spacer(1, 8)]))
-            elif item['tipo'] == 'texto':
-                hist.append(Paragraph(item['obj'], TXT))
-            else:
-                alto = int(min(max(item['alto'], 320), 760))
-                png = _fig_a_png(item['obj'], 1500, alto)
-                img_w = util
-                img_h = img_w * alto / 1500.0
-                maximo = alto_pag - 52 * mm
-                if img_h > maximo:
-                    img_h, img_w = maximo, maximo * 1500.0 / alto
-                hist.append(KeepTogether([Paragraph(item['titulo'], H3),
-                                          Image(io.BytesIO(png), width=img_w, height=img_h),
-                                          Spacer(1, 10)]))
-        hist.append(PageBreak())
+        if restante < ALTO_BANDA + 120:
+            hist.append(PageBreak()); restante = FRAME
+        hist += [banda(nombre), Spacer(1, 10)]
+        restante -= ALTO_BANDA + 10
 
-    if hist and isinstance(hist[-1], PageBreak):
+        i = 0
+        while i < len(items):
+            it = items[i]
+            empareja = (it.get('ancho') == 'medio' and i + 1 < len(items)
+                        and items[i + 1].get('ancho') == 'medio')
+            ancho_pt = medio if empareja else util
+            h = alto_de(it, ancho_pt)
+            if empareja:
+                h = max(h, alto_de(items[i + 1], medio))
+
+            if h > restante and restante < FRAME - 5:
+                hist.append(PageBreak()); restante = FRAME
+
+            if it['tipo'] == 'kpis':
+                hist += [Paragraph(it['titulo'], TIT), Paragraph(it['desc'], DESC),
+                         tabla_kpi(it['obj'], util), Spacer(1, 12)]
+            elif it['tipo'] == 'tabla':
+                hist += [Paragraph(it['titulo'], TIT), Paragraph(it['desc'], DESC),
+                         tabla_datos(it['obj'], util), Spacer(1, 12)]
+            elif empareja:
+                par = Table([[partes(it, medio), partes(items[i + 1], medio)]],
+                            colWidths=[medio, medio])
+                par.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                                         ('LEFTPADDING', (0, 0), (-1, -1), 0),
+                                         ('RIGHTPADDING', (0, 0), (0, 0), 8 * mm),
+                                         ('RIGHTPADDING', (1, 0), (1, 0), 0),
+                                         ('TOPPADDING', (0, 0), (-1, -1), 0),
+                                         ('BOTTOMPADDING', (0, 0), (-1, -1), 0)]))
+                hist += [par, Spacer(1, 8)]
+            else:
+                hist += partes(it, util) + [Spacer(1, 8)]
+
+            restante -= h
+            i += 2 if empareja else 1
+        hist.append(PageBreak())
+        restante = FRAME
+
+    while hist and isinstance(hist[-1], PageBreak):
         hist.pop()
-    doc.build(hist, onFirstPage=cabecera, onLaterPages=cabecera)
-    buffer.seek(0)
-    return buffer.getvalue()
+    doc.build(hist, onFirstPage=encabezado, onLaterPages=encabezado)
+    buf.seek(0)
+    return buf.getvalue()
 
 # ---------------------------------------------------------
 # PANEL DE CONTROL LATERAL
@@ -1663,15 +2221,6 @@ with tab_ase:
             p[5].metric("FRT p90", f"{df_pri['FRT_min'].quantile(0.9):.0f} min" if df_pri['FRT_min'].notna().any() else "s/d",
                         help="El 10% de conversaciones peor atendidas esperó al menos esto.")
 
-            kpis_reporte([
-                ("Conversaciones", f"{conv_p:,}"), ("Clientes atendidos", f"{cont_p:,}"),
-                ("Chats por cliente", f"{conv_p/cont_p:.2f}" if cont_p else "s/d"),
-                ("Chats por día hábil", f"{conv_p/dias_p:.1f}" if dias_p else "s/d"),
-                ("FRT mediano", f"{df_pri['FRT_min'].median():.0f} min" if df_pri['FRT_min'].notna().any() else "s/d"),
-                ("FRT p90", f"{df_pri['FRT_min'].quantile(0.9):.0f} min" if df_pri['FRT_min'].notna().any() else "s/d"),
-                ("Resolución mediana", f"{df_pri['res_time_wh_min'].median():.0f} min" if df_pri['res_time_wh_min'].notna().any() else "s/d"),
-                ("Días hábiles del período", f"{dias_p}"),
-            ], f"Capacidad y eficiencia · {linea_pri}", 'asesores')
             p2 = st.columns(6)
             p2[0].metric("Resolución Mediana", f"{df_pri['res_time_wh_min'].median():.0f} min" if df_pri['res_time_wh_min'].notna().any() else "s/d")
             p2[1].metric("Resolución p90", f"{df_pri['res_time_wh_min'].quantile(0.9):.0f} min"
@@ -1689,11 +2238,6 @@ with tab_ase:
                            subtitle="Estas cifras son solo de esta línea. El mismo asesor tiene números "
                                     "distintos en las otras conexiones.")
             mu = metricas_usuario_linea(df_pri)
-            tabla_reporte(mu[['user', 'Chats', '% de la Línea', 'Chats/Día', 'Contactos',
-                              'FRT_Mediano', 'FRT_p90', 'Resolucion_Mediana']].rename(columns={
-                                  'user': 'Asesor', 'FRT_Mediano': 'FRT med.', 'FRT_p90': 'FRT p90',
-                                  'Resolucion_Mediana': 'Resol. med.'}),
-                          f'Rendimiento por asesor · {linea_pri}', 'asesores')
             st.dataframe(
                 mu[['user', 'Chats', '% de la Línea', 'Chats/Día', 'Contactos', 'Chats/Contacto',
                     'FRT_Mediano', 'FRT_p90', 'Resolucion_Mediana', 'Nuevos']].rename(columns={
@@ -1735,6 +2279,20 @@ with tab_ase:
             fig_pf.update_layout(xaxis_title="Minutos", yaxis_title="", legend_title="", height=420,
                                  margin=dict(t=70, b=90, l=110, r=90))
             grafico(fig_pf, 'Tiempo de respuesta: mediana vs cola', 'asesores')
+
+            divider()
+
+            divider()
+
+            section_header("PATRIMONIO", f"Cartera de Cada Asesor · {linea_pri}",
+                           subtitle="Cantidad de chats y porcentaje por segmento, dentro de la cartera de "
+                                    "cada uno. Sirve para ver quién concentra patrimonio alto y quién "
+                                    "atiende volumen de tickets chicos.")
+            fig_pat = fig_patrimonio_por_asesor(df_pri)
+            if fig_pat is not None:
+                grafico(fig_pat, 'Mix patrimonial por asesor', 'asesores')
+            else:
+                st.info("No hay segmentos patrimoniales etiquetados en esta línea con los filtros actuales.")
 
             divider()
 
@@ -2273,17 +2831,6 @@ with tab_com:
                         delta_color="off",
                         help="El hueco entre leads reales y ganados. Abajo se abre en sus tres causas.")
 
-            kpis_reporte([
-                ("Escribieron al comercial", f"{total_leads:,}"),
-                ("Leads reales", f"{n_leads:,}"),
-                ("Ya eran clientes", f"{n_cliente:,}"),
-                ("Leads ganados", f"{n_ganados:,}"),
-                ("Tasa de conversión", f"{conversion:.1f}%" if pd.notna(conversion) else "s/d"),
-                ("Membresías", f"{n_membresia:,}"), ("Consultorías", f"{n_consultoria:,}"),
-                ("Derivados", f"{n_derivado:,}"), ("No aplica", f"{no_califica:,}"),
-                ("En proceso", f"{en_proceso:,}"), ("Sin definir", f"{sin_definir:,}"),
-                ("FRT p90", f"{nuevos['FRT_min'].quantile(0.9):.0f} min" if nuevos['FRT_min'].notna().any() else "s/d"),
-            ], f"Embudo comercial · {linea_cap}", 'comercial')
             k2 = st.columns(5)
             k2[0].metric("Membresías", f"{n_membresia:,}", help="Etiqueta «Membresia - Comercial».")
             k2[1].metric("Consultorías", f"{n_consultoria:,}", help="Etiqueta «Consultoria - Comercial».")
@@ -2434,13 +2981,6 @@ with tab_com:
             por_asesor['% Sin Definir'] = por_asesor['Sin_Definir'] / por_asesor['Leads'] * 100
             por_asesor = por_asesor.sort_values('Leads', ascending=False)
 
-            tabla_reporte(por_asesor[['Asesor', 'Leads', 'FRT_Mediano', 'Membresias', 'Consultorias',
-                                      'Derivados', 'Ganados', '% Conversión', 'No_Califica',
-                                      'En_Proceso', 'Sin_Definir']].rename(columns={
-                                          'FRT_Mediano': 'FRT med.', 'Membresias': 'Memb.',
-                                          'Consultorias': 'Consult.', 'No_Califica': 'No aplica',
-                                          'En_Proceso': 'En proceso', 'Sin_Definir': 'Sin definir'}),
-                          'Rendimiento por asesor en la línea comercial', 'comercial')
             st.dataframe(
                 por_asesor[['Asesor', 'Leads', 'FRT_Mediano', 'FRT_p90',
                             'Membresias', 'Consultorias', 'Derivados', 'Ganados', '% Conversión',
@@ -2535,45 +3075,60 @@ with tab_com:
 # ---------------------------------------------------------
 with tab_pdf:
     section_header("EXPORTAR", "Reporte en PDF",
-                   subtitle="Arma un PDF apaisado con los gráficos y tablas tal como se ven acá, "
-                            "respetando los filtros de período, conexión y asesor del panel lateral.")
+                   subtitle="Cada bloque se calcula sobre su propia línea: un reporte de asesores no "
+                            "incluye ni un chat del comercial. Respeta el filtro de período del panel "
+                            "lateral; la conexión la define la opción que elijas acá.")
+
+    linea_ase = detectar_linea_principal(df_raw)
+    linea_com = detectar_linea_captacion(df_raw)
 
     OPCIONES_PDF = {
-        "Solo Asesores": ['asesores'],
-        "Solo Comercial": ['comercial'],
-        "Completo (asesores + comercial)": ['asesores', 'comercial'],
+        f"Solo Asesores ({linea_ase})": ['asesores'],
+        f"Solo Comercial ({linea_com})": ['comercial'],
+        "Completo (las dos líneas)": ['asesores', 'comercial'],
     }
-    eleccion = st.radio("¿Qué querés exportar?", list(OPCIONES_PDF), horizontal=True, key="radio_pdf")
+    eleccion = st.radio("¿Qué querés exportar?", list(OPCIONES_PDF), key="radio_pdf")
     claves = OPCIONES_PDF[eleccion]
 
-    inventario = {k: len([i for i in REPORTE[k] if i['tipo'] == 'fig']) for k in claves}
-    st.caption("Va a incluir: " + " · ".join(
-        f"**{k.capitalize()}** ({v} gráficos, "
-        f"{len([i for i in REPORTE[k] if i['tipo'] == 'tabla'])} tablas)"
-        for k, v in inventario.items()))
+    df_pdf = df_raw.copy()
+    if periodos_sel:
+        df_pdf = df_pdf[df_pdf['periodo'].isin(periodos_sel)]
+    base_ase = df_pdf[df_pdf['conexion'] == linea_ase]
+    base_com = df_pdf[df_pdf['conexion'] == linea_com]
 
-    periodos_txt_pdf = ", ".join(periodos_sel) if periodos_sel else "todos los períodos"
-    conexiones_txt_pdf = ", ".join(conexiones_sel) if conexiones_sel else "todas las conexiones"
+    resumen = []
+    if 'asesores' in claves:
+        resumen.append(f"**{linea_ase}**: {base_ase[COL_ID].nunique():,} conversaciones")
+    if 'comercial' in claves:
+        resumen.append(f"**{linea_com}**: {base_com['contactNumber'].nunique():,} contactos")
+    st.caption("Va a incluir " + " y ".join(resumen) +
+               f", del período {', '.join(periodos_sel) if periodos_sel else 'completo'}.")
 
     if st.button("🖨️  Generar PDF", type="primary", key="btn_pdf"):
-        total_figs = sum(inventario.values())
-        with st.spinner(f"Renderizando {total_figs} gráficos y armando el documento…"):
+        with st.spinner("Renderizando los gráficos y armando el documento…"):
             try:
-                nombres = {'asesores': "Asesores · Capacidad y Eficiencia",
-                           'comercial': "Comercial · Embudo de Ventas"}
-                secciones = [(nombres[k], REPORTE[k]) for k in claves]
+                bloques = []
+                if 'asesores' in claves:
+                    bloques.append((f"Asesores · Capacidad y Eficiencia · {linea_ase}",
+                                    figuras_asesores(base_ase, linea_ase, periodos_disponibles)))
+                if 'comercial' in claves:
+                    bloques.append((f"Comercial · Embudo de Ventas · {linea_com}",
+                                    figuras_comercial(base_com, linea_com, df_raw)))
+
+                etiqueta_corta = ("asesores" if claves == ['asesores']
+                                  else "comercial" if claves == ['comercial'] else "completo")
                 pdf = construir_pdf(
-                    secciones,
-                    titulo=f"Reporte de Mensajería · {eleccion}",
-                    subtitulo=f"Período: {periodos_txt_pdf} &nbsp;|&nbsp; Conexión: {conexiones_txt_pdf} "
-                              f"&nbsp;|&nbsp; Jornada {HORARIO_TXT} hs. Todos los tiempos de respuesta y "
-                              "resolución están medidos en minutos de jornada laboral.",
-                    meta=f"BDI Consultora · generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}"
-                )
+                    bloques,
+                    titulo=f"Reporte de Mensajería · {eleccion.split(' (')[0]}",
+                    subtitulo=f"Período analizado: {', '.join(periodos_sel) if periodos_sel else 'todo el histórico'}. "
+                              f"Jornada laboral de {HORARIO_TXT} hs: todos los tiempos de respuesta y "
+                              "resolución están medidos en minutos de jornada, descontando noches, fines "
+                              "de semana y feriados de Argentina. La unidad de conteo es la conversación "
+                              "única, y en el bloque comercial, el contacto único.",
+                    meta=f"BDI Consultora · generado el {datetime.now().strftime('%d/%m/%Y %H:%M')}")
                 st.session_state['pdf_bytes'] = pdf
                 st.session_state['pdf_nombre'] = (
-                    f"BDI_mensajeria_{eleccion.split()[1].lower() if len(eleccion.split()) > 1 else 'reporte'}"
-                    f"_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf")
+                    f"BDI_mensajeria_{etiqueta_corta}_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf")
             except Exception as e:
                 st.session_state.pop('pdf_bytes', None)
                 st.error(f"No se pudo generar el PDF → {type(e).__name__}: {e}")
@@ -2585,15 +3140,19 @@ with tab_pdf:
         st.download_button("⬇️  Descargar PDF", data=st.session_state['pdf_bytes'],
                            file_name=st.session_state.get('pdf_nombre', 'reporte.pdf'),
                            mime="application/pdf", type="primary", key="dl_pdf")
-        st.caption("El PDF queda disponible hasta que cambies los filtros y vuelvas a generarlo.")
+        st.caption("Queda disponible hasta que cambies los filtros y lo vuelvas a generar.")
 
     st.markdown("""
 ---
-**Qué entra en cada opción**
+**Cómo está armado**
 
-- **Solo Asesores** — evolución mensual, carga horaria, mapa de calor día/hora, rendimiento por
-  asesor, composición mensual, brokers y segmentos patrimoniales, top de clientes y fricción.
-- **Solo Comercial** — embudo, conciliación de leads, semáforo de respuesta, flujo diario,
-  hora de entrada vs demora y rendimiento por asesor de la línea.
-- **Completo** — las dos, una después de la otra, cada sección arrancando en página nueva.
+Cada gráfico lleva un título que dice qué pregunta responde y un párrafo corto que explica qué mide
+y cómo leerlo, para que el reporte se entienda sin tener a alguien al lado explicándolo.
+
+- **Solo Asesores** — capacidad instalada, volumen mensual, carga horaria, mapa de calor día/hora,
+  reparto entre asesores, velocidad de respuesta, mix patrimonial de cada cartera, brokers,
+  fricción por plataforma y clientes que más demandan.
+- **Solo Comercial** — embudo de tres escalones, desglose de desenlaces, velocidad de respuesta a
+  prospectos, ritmo diario de entrada, ventanas horarias sin cobertura y rendimiento por asesor.
+- **Completo** — las dos, cada una arrancando en página nueva con su banda de título.
 """)
