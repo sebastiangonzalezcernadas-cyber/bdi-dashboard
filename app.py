@@ -221,20 +221,23 @@ TAG_CONSULTORIA_COMERCIAL = 'consultoriacomercial'
 TAGS_DERIVADO = ('derivado', 'derivadoaasesor', 'derivadoasesor', 'derivadoaasesores')
 TAGS_CLIENTE_EXISTENTE = ('membresia', 'membresiabdi', 'membresiaplus', 'consultoria')
 TAG_NO_CALIFICA = 'nocalifica'
+TAGS_EN_PROCESO = ('enproceso', 'engestion', 'seguimiento', 'enseguimiento')
 
 DES_MEMBRESIA = 'Membresía - Comercial'
 DES_CONSULTORIA = 'Consultoría - Comercial'
 DES_DERIVADO = 'Derivado a asesor'
 DES_NO_CALIFICA = 'No califica'
+DES_EN_PROCESO = 'En proceso'
 DES_SIN_DEFINIR = 'Sin definir'
 DES_CLIENTE = 'Consulta de cliente existente'
 
 # Las tres que cuentan como lead ganado, en el orden en que se muestran en el embudo.
 DESENLACES_GANADOS = [DES_MEMBRESIA, DES_CONSULTORIA, DES_DERIVADO]
-DESENLACES = DESENLACES_GANADOS + [DES_NO_CALIFICA, DES_SIN_DEFINIR]
+DESENLACES = DESENLACES_GANADOS + [DES_NO_CALIFICA, DES_EN_PROCESO, DES_SIN_DEFINIR]
 DESENLACE_COLORS = {
     DES_MEMBRESIA: '#0F5132', DES_CONSULTORIA: '#C9A227', DES_DERIVADO: '#3AAFB9',
-    DES_NO_CALIFICA: '#D6336C', DES_SIN_DEFINIR: '#C9D2CE', DES_CLIENTE: '#B9C2BD'
+    DES_NO_CALIFICA: '#D6336C', DES_EN_PROCESO: '#8FBF74', DES_SIN_DEFINIR: '#C9D2CE',
+    DES_CLIENTE: '#B9C2BD'
 }
 COLOR_ETAPA_1 = '#157347'
 COLOR_ETAPA_2 = '#5FBB8C'
@@ -812,6 +815,9 @@ def analizar_captacion(df_linea, df_historia, linea):
             # Vale la etiqueta manual o la evidencia: el contacto aparece después
             # conversando en la línea de asesores.
             desenlace = DES_DERIVADO
+        elif normalizadas & set(TAGS_EN_PROCESO):
+            # Conversación abierta: todavía no se decidió. No es lo mismo que no etiquetar.
+            desenlace = DES_EN_PROCESO
         else:
             desenlace = DES_SIN_DEFINIR
 
@@ -1993,15 +1999,16 @@ with tab_com:
             st.info(f"No hay conversaciones de **{linea_cap}** en la selección actual.")
         else:
             # ---- Base del embudo: TODOS los contactos únicos que escribieron al comercial.
-            # Después se van descontando, en este orden, los que no son lead de verdad.
+            # Un solo filtro antes de medir conversión: quién es lead y quién no.
+            # «No califica», «En proceso» y los sin etiquetar NO son escalones del embudo:
+            # son las tres formas distintas de no haber cerrado todavía, y se abren abajo
+            # en la barra de conciliación. Meterlas como escalón mezcla un descarte
+            # definitivo con una conversación que sigue abierta.
             total_leads = len(leads)
             es_cliente = ((leads['Desenlace'] == DES_CLIENTE) | (leads['Estado'] == 'Ya era cliente'))
-            es_no_califica = (leads['Desenlace'] == DES_NO_CALIFICA) & ~es_cliente
 
             n_cliente = int(es_cliente.sum())
-            no_califica = int(es_no_califica.sum())
-
-            nuevos = leads[~es_cliente & ~es_no_califica]
+            nuevos = leads[~es_cliente]
             n_leads = len(nuevos)
 
             respondidos = int(nuevos['Respondido'].sum())
@@ -2009,23 +2016,24 @@ with tab_com:
             n_membresia = int((nuevos['Desenlace'] == DES_MEMBRESIA).sum())
             n_consultoria = int((nuevos['Desenlace'] == DES_CONSULTORIA).sum())
             n_derivado = int((nuevos['Desenlace'] == DES_DERIVADO).sum())
+            no_califica = int((nuevos['Desenlace'] == DES_NO_CALIFICA).sum())
+            en_proceso = int((nuevos['Desenlace'] == DES_EN_PROCESO).sum())
             sin_definir = int((nuevos['Desenlace'] == DES_SIN_DEFINIR).sum())
             n_ganados = n_membresia + n_consultoria + n_derivado
             conversion = n_ganados / n_leads * 100 if n_leads else np.nan
             horas_der = nuevos.loc[nuevos['Desenlace'] == DES_DERIVADO, 'Horas a Derivación'].median()
 
             section_header("EMBUDO", f"Del Primer Mensaje a la Venta · {linea_cap}",
-                           subtitle="La unidad es el contacto único, no la conversación. Cada escalón "
-                                    "descuenta a los que no son lead de verdad, y el último se abre "
-                                    "en las tres formas de ganarlo.")
+                           subtitle="La unidad es el contacto único, no la conversación. Un solo filtro: "
+                                    "quién es lead y quién ya era cliente. El último escalón se abre en "
+                                    "las tres formas de ganarlo.")
 
-            # ---- Embudo centrado de cuatro niveles.
+            # ---- Embudo centrado de tres niveles.
             # Cada fila es una barra apilada con un espaciador transparente a la izquierda,
             # de ancho (máximo − total de la fila) / 2. Eso la centra y produce la silueta
             # de embudo sin salir de go.Bar, que permite segmentar el último nivel.
-            etiquetas_y = ['4 · Leads ganados', '3 · Leads nuevos reales',
-                           '2 · Aplican a nuestros servicios', '1 · Escribieron al comercial']
-            anchos = [n_ganados, n_leads, total_leads - no_califica, total_leads]
+            etiquetas_y = ['3 · Leads ganados', '2 · Leads reales', '1 · Escribieron al comercial']
+            anchos = [n_ganados, n_leads, total_leads]
             ancho_max = max(total_leads, 1)
 
             def _pct(v, base):
@@ -2037,15 +2045,14 @@ with tab_com:
                             marker=dict(color='rgba(0,0,0,0)'), showlegend=False,
                             hoverinfo='skip', name='')
             fig_emb.add_bar(
-                y=etiquetas_y, x=[0] + anchos[1:], orientation='h',
-                marker=dict(color=['rgba(0,0,0,0)', COLOR_ETAPA_3, COLOR_ETAPA_2, COLOR_ETAPA_1],
+                y=etiquetas_y, x=[0, n_leads, total_leads], orientation='h',
+                marker=dict(color=['rgba(0,0,0,0)', COLOR_ETAPA_2, COLOR_ETAPA_1],
                             line=dict(color='#FFFFFF', width=2)),
                 text=['',
-                      f"{n_leads} leads nuevos · {_pct(n_leads, total_leads)} de los que escribieron",
-                      f"{anchos[2]} aplican · {_pct(anchos[2], total_leads)}",
+                      f"{n_leads} leads reales · {_pct(n_leads, total_leads)} de los que escribieron",
                       f"{total_leads} contactos únicos"],
                 textposition='inside', insidetextanchor='middle',
-                textfont=dict(color='#FFFFFF', size=16, family='Inter, Segoe UI, sans-serif'),
+                textfont=dict(color='#FFFFFF', size=17, family='Inter, Segoe UI, sans-serif'),
                 showlegend=False, name='Etapa',
                 hovertemplate="%{y}<br>%{x} contactos<extra></extra>"
             )
@@ -2054,9 +2061,9 @@ with tab_com:
                                     (DES_DERIVADO, n_derivado)]:
                 corto = etiqueta.split(' - ')[0].split(' a ')[0]
                 fig_emb.add_bar(
-                    y=etiquetas_y, x=[valor, 0, 0, 0], orientation='h', name=etiqueta,
+                    y=etiquetas_y, x=[valor, 0, 0], orientation='h', name=etiqueta,
                     marker=dict(color=DESENLACE_COLORS[etiqueta], line=dict(color='#FFFFFF', width=2)),
-                    text=[f"{corto}<br>{valor} · {_pct(valor, n_leads)}" if valor else '', '', '', ''],
+                    text=[f"{corto}<br>{valor} · {_pct(valor, n_leads)}" if valor else '', '', ''],
                     textposition='inside', insidetextanchor='middle',
                     textfont=dict(color='#FFFFFF', size=15, family='Inter, Segoe UI, sans-serif'),
                     hovertemplate=f"<b>{etiqueta}</b><br>%{{x}} leads<extra></extra>"
@@ -2066,19 +2073,18 @@ with tab_com:
             fig_emb.update_layout(
                 title=dict(text=f"Embudo Comercial · {linea_cap}",
                            font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
-                barmode='stack', bargap=0.32,
+                barmode='stack', bargap=0.30,
                 xaxis=dict(visible=False, range=[0, ancho_max * 1.02]),
-                yaxis=dict(tickfont=dict(color='#0F5132', size=15), showgrid=False,
+                yaxis=dict(tickfont=dict(color='#0F5132', size=16), showgrid=False,
                            categoryorder='array', categoryarray=etiquetas_y),
                 legend_title="Cómo se ganó",
                 uniformtext=dict(minsize=12, mode='hide'),
-                height=500, margin=dict(t=80, b=110, l=260, r=80)
+                height=430, margin=dict(t=80, b=110, l=250, r=90)
             )
-            # Cada pérdida anotada a la derecha de su escalón.
+            pendientes = n_leads - n_ganados
             for fila, cantidad, texto, color in [
-                ('2 · Aplican a nuestros servicios', no_califica, 'no califica', '#D6336C'),
-                ('3 · Leads nuevos reales', n_cliente, 'ya eran clientes', '#8A6D00'),
-                ('4 · Leads ganados', sin_definir, 'sin definir', '#7A867F')]:
+                ('2 · Leads reales', n_cliente, 'ya eran clientes', '#8A6D00'),
+                ('3 · Leads ganados', pendientes, 'todavía sin cerrar', '#7A867F')]:
                 if cantidad:
                     fig_emb.add_annotation(x=ancho_max, y=fila, xanchor='left', yanchor='middle',
                                            text=f"<b>−{cantidad}</b> {texto}", showarrow=False,
@@ -2086,18 +2092,20 @@ with tab_com:
             st.plotly_chart(fig_emb, **ANCHO)
 
             k = st.columns(5)
-            k[0].metric("Escribieron", f"{total_leads:,}", help="Contactos únicos que escribieron al número comercial.")
-            k[1].metric("Leads Nuevos", f"{n_leads:,}",
-                        delta=f"−{no_califica} no califica · −{n_cliente} ya clientes",
-                        delta_color="off",
-                        help="Lo que queda tras descontar a los que no califican y a los que ya eran clientes.")
-            k[2].metric("Leads Ganados", f"{n_ganados:,}", help="Membresía + consultoría + derivados a un asesor.")
+            k[0].metric("Escribieron", f"{total_leads:,}",
+                        help="Contactos únicos que escribieron al número comercial.")
+            k[1].metric("Leads Reales", f"{n_leads:,}",
+                        delta=f"−{n_cliente} ya eran clientes", delta_color="off",
+                        help="Lo que queda tras descontar a quienes ya tenían membresía o consultoría, "
+                             "o ya conversaban con la mesa de asesores.")
+            k[2].metric("Leads Ganados", f"{n_ganados:,}",
+                        help="Membresía + consultoría + derivados a un asesor.")
             k[3].metric("Tasa de Conversión", f"{conversion:.1f}%" if pd.notna(conversion) else "s/d",
-                        help="Ganados sobre leads nuevos reales. Es un piso mientras queden leads sin definir.")
-            k[4].metric("Sin Definir", f"{sin_definir:,}",
-                        delta=f"{sin_definir/n_leads*100:.0f}% de los leads" if n_leads else None,
+                        help="Ganados sobre leads reales. Es un piso mientras queden leads sin definir.")
+            k[4].metric("Sin Cerrar", f"{pendientes:,}",
+                        delta=f"{pendientes/n_leads*100:.0f}% de los leads" if n_leads else None,
                         delta_color="off",
-                        help="Sin etiqueta, o con una que no es ninguna de las cuatro de cierre.")
+                        help="El hueco entre leads reales y ganados. Abajo se abre en sus tres causas.")
 
             k2 = st.columns(5)
             k2[0].metric("Membresías", f"{n_membresia:,}", help="Etiqueta «Membresia - Comercial».")
@@ -2106,10 +2114,55 @@ with tab_com:
                          delta=f"{horas_der:.0f} hs hasta derivar" if pd.notna(horas_der) else None,
                          delta_color="off",
                          help="Etiqueta de derivación, o el contacto aparece después conversando con un asesor.")
-            k2[3].metric("Tasa de Respuesta", f"{respondidos/n_leads*100:.0f}%" if n_leads else "s/d",
-                         help="Leads nuevos que recibieron al menos una respuesta.")
-            k2[4].metric("FRT p90", f"{nuevos['FRT_min'].quantile(0.9):.0f} min" if nuevos['FRT_min'].notna().any() else "s/d",
-                         help="El 10% peor de los leads espera al menos esto, en minutos de jornada laboral.")
+            k2[3].metric("No Califica", f"{no_califica:,}",
+                         delta=f"{no_califica/n_leads*100:.1f}% de los leads" if n_leads else None,
+                         delta_color="off",
+                         help="Decidido que no: mostraron interés pero no llegan a los mínimos.")
+            k2[4].metric("Tasa de Respuesta", f"{respondidos/n_leads*100:.0f}%" if n_leads else "s/d",
+                         delta=f"p90 {nuevos['FRT_min'].quantile(0.9):.0f} min" if nuevos['FRT_min'].notna().any() else None,
+                         delta_color="off",
+                         help="Leads que recibieron al menos una respuesta. Debajo, el p90: el 10% peor "
+                              "atendido espera al menos eso, en minutos de jornada laboral.")
+
+            # ---- Conciliación: los leads reales desglosados al 100%.
+            # Es la auditoría del embudo. Si todo está etiquetado, "Sin definir" debe
+            # quedar en cero y las otras cinco tienen que sumar exactamente los leads reales.
+            section_header("CONCILIACIÓN", f"Los {n_leads} Leads Reales, Categoría por Categoría",
+                           subtitle="El hueco entre leads y ganados no es una sola cosa: «No aplica» es un "
+                                    "descarte decidido, «En proceso» es una charla abierta y «Sin definir» "
+                                    "es un desenlace que nadie registró. Solo el tercero es un problema.")
+
+            categorias = [(DES_MEMBRESIA, n_membresia), (DES_CONSULTORIA, n_consultoria),
+                          (DES_DERIVADO, n_derivado), (DES_NO_CALIFICA, no_califica),
+                          (DES_EN_PROCESO, en_proceso), (DES_SIN_DEFINIR, sin_definir)]
+            fig_con = go.Figure()
+            for etiqueta, valor in categorias:
+                if not valor:
+                    continue
+                pct = valor / n_leads * 100 if n_leads else 0
+                fig_con.add_bar(
+                    y=['Leads reales'], x=[valor], orientation='h', name=etiqueta,
+                    marker=dict(color=DESENLACE_COLORS[etiqueta], line=dict(color='#FFFFFF', width=2)),
+                    text=[f"{valor}<br>{pct:.0f}%"], textposition='inside', insidetextanchor='middle',
+                    textfont=dict(color='#FFFFFF' if etiqueta != DES_SIN_DEFINIR else '#14382A', size=15),
+                    hovertemplate=f"<b>{etiqueta}</b><br>%{{x}} leads ({pct:.1f}%)<extra></extra>"
+                )
+            fig_con = apply_bdi_theme(fig_con, legend_below=True)
+            fig_con.update_layout(
+                title=dict(text="Desglose Completo de los Leads Reales",
+                           font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
+                barmode='stack', bargap=0.6,
+                xaxis=dict(visible=False, range=[0, max(n_leads, 1) * 1.01]),
+                yaxis=dict(showticklabels=False, showgrid=False),
+                legend_title="Desenlace", uniformtext=dict(minsize=12, mode='hide'),
+                height=300, margin=dict(t=80, b=120, l=40, r=40)
+            )
+            st.plotly_chart(fig_con, **ANCHO)
+
+            if sin_definir == 0 and n_leads:
+                st.success(f"Los {n_leads} leads del período están todos etiquetados: "
+                           f"{n_ganados} ganados, {no_califica} no aplican y {en_proceso} en proceso. "
+                           "La conversión que muestra el embudo es el número real, no un piso.", icon="✅")
 
             conv_sin_resp = int(df_cap['FRT_min'].isna().sum())
             if conv_sin_resp > (n_leads - respondidos):
@@ -2129,8 +2182,9 @@ with tab_com:
                 if solo_historial:
                     detalle_cli.append(f"{solo_historial} que ya conversaban con la mesa de asesores")
                 st.caption(f"ℹ️ Los **{n_cliente} contactos que ya eran clientes** se descuentan en el "
-                           f"escalón 3: {' y '.join(detalle_cli)}. No son captación, pero miden cuánta "
-                           "carga de consulta absorbe el número comercial.")
+                           f"escalón 2: {' y '.join(detalle_cli)}. No son captación, pero miden cuánta "
+                           "carga de consulta absorbe el número comercial "
+                           f"({n_cliente/total_leads*100:.0f}% de todo lo que entra).")
 
             ganados_clientes = int(leads.loc[es_cliente, 'Desenlace'].isin(DESENLACES_GANADOS).sum())
             if ganados_clientes:
@@ -2204,32 +2258,33 @@ with tab_com:
                 Consultorias=('Desenlace', lambda s: int((s == DES_CONSULTORIA).sum())),
                 Derivados=('Desenlace', lambda s: int((s == DES_DERIVADO).sum())),
                 No_Califica=('Desenlace', lambda s: int((s == DES_NO_CALIFICA).sum())),
+                En_Proceso=('Desenlace', lambda s: int((s == DES_EN_PROCESO).sum())),
                 Sin_Definir=('Desenlace', lambda s: int((s == DES_SIN_DEFINIR).sum())),
             ).reset_index()
             por_asesor['Sin Responder'] = por_asesor['Leads'] - por_asesor['Respondidos']
-            por_asesor['Aplican'] = por_asesor['Leads'] - por_asesor['No_Califica']
             por_asesor['Ganados'] = (por_asesor['Membresias'] + por_asesor['Consultorias']
                                      + por_asesor['Derivados'])
-            por_asesor['% Conversión'] = np.where(por_asesor['Aplican'] > 0,
-                                                  por_asesor['Ganados'] / por_asesor['Aplican'] * 100, np.nan)
+            por_asesor['% Conversión'] = np.where(por_asesor['Leads'] > 0,
+                                                  por_asesor['Ganados'] / por_asesor['Leads'] * 100, np.nan)
             por_asesor['% Sin Definir'] = por_asesor['Sin_Definir'] / por_asesor['Leads'] * 100
             por_asesor = por_asesor.sort_values('Leads', ascending=False)
 
             st.dataframe(
                 por_asesor[['Asesor', 'Leads', 'Sin Responder', 'FRT_Mediano', 'FRT_p90',
-                            'No_Califica', 'Aplican', 'Membresias', 'Consultorias', 'Derivados',
-                            'Ganados', '% Conversión', 'Sin_Definir', '% Sin Definir']].rename(columns={
+                            'Membresias', 'Consultorias', 'Derivados', 'Ganados', '% Conversión',
+                            'No_Califica', 'En_Proceso', 'Sin_Definir', '% Sin Definir']].rename(columns={
                     'FRT_Mediano': 'FRT Mediano', 'FRT_p90': 'FRT p90', 'No_Califica': 'No Califica',
                     'Membresias': 'Membresías', 'Consultorias': 'Consultorías',
-                    'Sin_Definir': 'Sin Definir'}).style.format({
+                    'En_Proceso': 'En Proceso', 'Sin_Definir': 'Sin Definir'}).style.format({
                         'FRT Mediano': '{:.0f}', 'FRT p90': '{:.0f}',
                         '% Conversión': '{:.1f}%', '% Sin Definir': '{:.0f}%'}),
                 column_config={
                     "FRT Mediano": st.column_config.NumberColumn(help="Minutos de jornada hasta la primera respuesta."),
                     "FRT p90": st.column_config.NumberColumn(help="El 10% de leads peor atendidos esperó al menos esto."),
-                    "Aplican": st.column_config.NumberColumn(help="Leads menos los etiquetados «No califica»."),
                     "Ganados": st.column_config.NumberColumn(help="Membresías + consultorías + derivados."),
-                    "% Conversión": st.column_config.NumberColumn(help="Ganados sobre los leads que aplican."),
+                    "% Conversión": st.column_config.NumberColumn(help="Ganados sobre los leads reales de ese asesor."),
+                    "En Proceso": st.column_config.NumberColumn(help="Charla abierta: todavía no se decidió."),
+                    "Sin Definir": st.column_config.NumberColumn(help="Sin ninguna etiqueta de desenlace."),
                 },
                 hide_index=True, **ANCHO
             )
