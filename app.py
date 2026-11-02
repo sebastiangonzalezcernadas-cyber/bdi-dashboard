@@ -1160,8 +1160,19 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
     if not orden:
         return None
 
-    cols = min(3, len(orden))
-    filas = int(np.ceil(len(orden) / cols))
+    # Grilla equilibrada y acotada a 2 filas hasta 10 asesores. Con la regla vieja
+    # (3 columnas fijas) el séptimo asesor abría una tercera fila: la imagen pasaba
+    # a 563 pt de alto contra un marco de 498 y el PDF entero no se podía generar.
+    # Primero se decide la cantidad de filas, y las columnas se reparten parejas
+    # para no dejar una última fila casi vacía.
+    n = len(orden)
+    filas = 1 if n <= 4 else 2 if n <= 10 else 3
+    cols = int(np.ceil(n / filas))
+    # Cuantas más columnas, menos lugar tiene cada torta: la tipografía acompaña
+    # para que las etiquetas no se pisen entre porciones vecinas.
+    cuerpo = (16 if cols <= 3 else 14 if cols == 4 else 12) if para_pdf else \
+             (12 if cols <= 3 else 11 if cols == 4 else 10)
+
     fig = make_subplots(
         rows=filas, cols=cols,
         specs=[[{'type': 'domain'} for _ in range(cols)] for _ in range(filas)],
@@ -1176,15 +1187,15 @@ def fig_patrimonio_por_asesor(d, para_pdf=False):
             marker=dict(colors=[TIER_COLORS[t] for t in g.index],
                         line=dict(color='#FFFFFF', width=2)),
             texttemplate='%{value}<br>%{percent}', textposition='auto',
-            textfont=dict(size=16 if para_pdf else 12),
+            textfont=dict(size=cuerpo),
             insidetextorientation='horizontal',
-            outsidetextfont=dict(size=14 if para_pdf else 11, color='#1A252C'),
+            outsidetextfont=dict(size=cuerpo - 2, color='#1A252C'),
             sort=False, showlegend=(i == 0), automargin=True,
             hovertemplate="<b>%{label}</b><br>%{value} chats (%{percent})<extra></extra>"
         ), row=i // cols + 1, col=i % cols + 1)
 
     for ann in fig.layout.annotations:
-        ann.font = dict(color='#0F5132', size=15 if para_pdf else 14,
+        ann.font = dict(color='#0F5132', size=(cuerpo - 1 if para_pdf else cuerpo + 2),
                         family='Inter, Segoe UI, sans-serif')
     fig.update_layout(
         title=dict(text="Mix Patrimonial de la Cartera de Cada Asesor",
@@ -1766,8 +1777,14 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
     doc = SimpleDocTemplate(buf, pagesize=landscape(A4), leftMargin=MG, rightMargin=MG,
                             topMargin=17 * mm, bottomMargin=13 * mm,
                             title=titulo, author="BDI Consultora")
-    util = W - 2 * MG
+    # El marco de texto de reportlab agrega 6 pt de padding por lado por dentro de
+    # los márgenes. Sin descontarlos, cada imagen a ancho completo salía 12 pt más
+    # ancha que el marco que la tiene que recibir.
+    util = W - 2 * MG - 12
     medio = (util - 8 * mm) / 2
+    # Alto realmente disponible dentro del marco, con el mismo descuento de padding.
+    ALTO_MARCO = H - 17 * mm - 13 * mm - 12
+    ALTO_TITULO, ALTO_DESC, ALTO_BANDA = 17, 40, 36
 
     S = getSampleStyleSheet()
     H1 = ParagraphStyle('H1', parent=S['Title'], fontName='Helvetica-Bold', fontSize=23,
@@ -1803,14 +1820,31 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
         c.drawRightString(W - MG, 6.5 * mm, f"Página {d_.page}")
         c.restoreState()
 
+    def medidas(item, ancho_pt):
+        """Medida final de la imagen en la hoja, respetando la proporción.
+
+        Un gráfico muy alto (las tortas por asesor crecen de fila en fila al sumar
+        gente) no puede exceder el marco: reportlab aborta el documento entero con
+        LayoutError. Si el alto no entra, manda el alto y el ancho lo acompaña.
+        """
+        ratio = max(float(item['ratio']), 0.05)
+        alto_pt = ancho_pt * ratio
+        tope = ALTO_MARCO - ALTO_TITULO - ALTO_DESC - 14   # lugar del título y el texto
+        if alto_pt > tope:
+            alto_pt = tope
+            ancho_pt = alto_pt / ratio
+        return ancho_pt, alto_pt
+
     def img(item, ancho_pt):
         # El lienzo se calcula PROPORCIONAL al ancho final en la hoja. Antes todo se
         # renderizaba a 1450 px: un gráfico de media página se achicaba a la mitad y
         # su tipografía terminaba imprimiéndose a 3,8 pt, ilegible.
-        alto_pt = ancho_pt * item['ratio']
+        ancho_pt, alto_pt = medidas(item, ancho_pt)
         lienzo = ancho_pt * 1.9
         png = _fig_a_png(item['obj'], lienzo, lienzo * item['ratio'])
-        return Image(io.BytesIO(png), width=ancho_pt, height=alto_pt)
+        im = Image(io.BytesIO(png), width=ancho_pt, height=alto_pt)
+        im.hAlign = 'CENTER'      # si se achicó por alto, queda centrado y no corrido
+        return im
 
     def partes(item, ancho_pt):
         """Título + explicación + gráfico. Como lista plana, porque un KeepTogether
@@ -1870,8 +1904,7 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
     # Antes del elemento se inserta un CondPageBreak con su alto estimado: reportlab
     # salta de hoja solo si realmente no entra. Llevar la cuenta a mano generaba
     # páginas en blanco cuando la estimación y el alto real no coincidían.
-    FRAME = H - doc.topMargin - doc.bottomMargin
-    ALTO_TITULO, ALTO_DESC, ALTO_BANDA = 17, 40, 36
+    FRAME = ALTO_MARCO
 
     hist = [Paragraph(titulo, H1), Paragraph(subtitulo, SUB)]
 
@@ -1881,7 +1914,9 @@ def construir_pdf(bloques, titulo, subtitulo, meta):
             return ALTO_TITULO + ALTO_DESC + int(np.ceil(len(item['obj']) / cols_kpi)) * 35 + 12
         if item['tipo'] == 'tabla':
             return ALTO_TITULO + ALTO_DESC + (len(item['obj']) + 1) * 23 + 14
-        return ALTO_TITULO + ALTO_DESC + ancho_pt * item['ratio'] + 12
+        # Usa la medida final (ya recortada si hacía falta): si estimara el alto sin
+        # recortar, pediría un salto de hoja que no corresponde y dejaría una en blanco.
+        return ALTO_TITULO + ALTO_DESC + medidas(item, ancho_pt)[1] + 12
 
     for bi, (nombre, items) in enumerate(bloques):
         if not items:
