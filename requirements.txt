@@ -9,7 +9,14 @@
 # Antes de mover cualquier tope de versión, probar el deploy y mirar los logs.
 # ===========================================================
 
-streamlit>=1.36,<2
+# FIJADA EXACTA, no en rango. Streamlit no es solo Python: trae su propio
+# frontend compilado en archivos .js que el navegador baja aparte. Con un rango,
+# cada redeploy podía instalar una versión distinta, y el navegador terminaba
+# pidiendo archivos .js que ya no existían. Ese es el error
+#   "TypeError: Failed to fetch dynamically imported module .../static/js/..."
+# repetido en cada widget de la pantalla (03/11/2026).
+# Esta es la versión contra la que está probado el tablero entero.
+streamlit==1.66.1
 
 # pandas 3.x pasa los strings a Arrow por defecto y es la combinación que rompió.
 # La serie 2.2 es estable y no requiere ningún cambio en el código.
@@ -22,8 +29,10 @@ numpy>=1.26,<2.3
 # La 25 tiene un segfault conocido (apache/arrow#50471) y la 24 tampoco aguantó.
 pyarrow>=14,<19
 
+# plotly también entrega JS al navegador, y Streamlit lo carga como módulo
+# dinámico: mismo riesgo que arriba. Fijada exacta por el mismo motivo.
 # plotly 7 es un salto mayor; la serie 5 cubre todo lo que usa el tablero.
-plotly>=5.18,<6
+plotly==5.24.1
 
 openpyxl>=3.1,<4
 holidays>=0.40,<1
