@@ -1736,6 +1736,68 @@ def fig_embudo_evento(fila, para_pdf=False):
         uniformtext=dict(minsize=10, mode='show'))
     return fig
 
+def fig_reasignaciones_perfil(r, para_pdf=False):
+    """Reasignaciones por tramo de patrimonio, abiertas por broker.
+
+    Es el único desenlace comercial con el perfil cargado: para pasarle un lead
+    a la mesa hay que saber cuánto maneja y en qué broker opera, así que la
+    etiqueta se pone sí o sí. En las ventas de producto esa etiqueta no existe.
+
+    El eje conserva el ORDEN DE LOS TRAMOS, no se ordena por volumen: el orden
+    de los tramos es información y reordenarlos por cantidad la destruye.
+    """
+    if r.empty:
+        return None
+    orden_tramos = [t for t in TIERS if t in set(r['Monto'])]
+    if 'Sin dato' in set(r['Monto']):
+        orden_tramos = orden_tramos + ['Sin dato']
+    brokers = [b for b in BROKERS if b in set(r['Broker'])]
+    brokers += sorted(set(r['Broker']) - set(brokers) - {'Sin dato'})
+    if 'Sin dato' in set(r['Broker']):
+        brokers.append('Sin dato')
+
+    tabla = pd.crosstab(r['Monto'], r['Broker']).reindex(
+        index=orden_tramos, columns=brokers).fillna(0).astype(int)
+    total = int(tabla.values.sum())
+    paleta = dict(BROKER_COLORS)
+    paleta['Sin dato'] = '#C9D2CE'
+    reserva = [c for c in PALETA_ASESORES if c not in paleta.values()]
+
+    fig = go.Figure()
+    for i, b in enumerate(brokers):
+        fig.add_trace(go.Bar(
+            y=tabla.index, x=tabla[b], name=b, orientation='h',
+            marker=dict(color=paleta.get(b, reserva[i % len(reserva)]),
+                        line=dict(color='#FFFFFF', width=1)),
+            text=[str(v) if v else '' for v in tabla[b]],
+            textposition='inside', insidetextanchor='middle', textangle=0,
+            textfont=dict(size=12 if para_pdf else 11, color='#FFFFFF'),
+            hovertemplate=f"<b>{b}</b><br>%{{y}}<br>%{{x}} reasignaciones<extra></extra>"))
+
+    # Total y peso de cada tramo, escritos al final de la barra.
+    fila_tot = tabla.sum(axis=1)
+    for tramo, v in fila_tot.items():
+        if v:
+            fig.add_annotation(x=v + fila_tot.max() * 0.025, y=tramo,
+                               text=f"<b>{int(v)}</b> · {v / total * 100:.0f}%",
+                               showarrow=False, xanchor='left',
+                               font=dict(size=12 if para_pdf else 11, color='#5B6E67'))
+    fig.update_layout(
+        barmode='stack', height=max(150 + 62 * len(tabla), 310), bargap=0.38,
+        title=dict(text="<b>Qué patrimonio y qué broker se le pasa a la mesa</b>",
+                   font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
+        xaxis=dict(title="Leads reasignados", range=[0, max(fila_tot.max(), 1) * 1.30],
+                   showgrid=True, gridcolor='#EEF3F0', zeroline=False),
+        yaxis=dict(title="", autorange='reversed', tickfont=dict(size=12.5)),
+        legend=dict(orientation='h', yanchor='top', y=-0.16, xanchor='center', x=0.5,
+                    traceorder='normal', title=dict(text="Broker   ")),
+        margin=dict(t=90, b=95, l=155, r=60),
+        paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=12),
+        uniformtext=dict(minsize=9, mode='show'))
+    return fig
+
 def fig_patrimonio_por_asesor(d, para_pdf=False):
     """Una torta por asesor con su mix de segmentos patrimoniales.
 
@@ -3976,6 +4038,81 @@ with tab_com:
                     "cuál, en vez de romper el tablero.")
                 for nivel, msg in log_eventos:
                     (st.success if nivel == 'ok' else st.warning if nivel == 'warn' else st.error)(msg)
+
+            # =======================================================
+            # REASIGNACIONES: PATRIMONIO Y BROKER DE LO QUE PASA A LA MESA
+            # =======================================================
+            reas = leads[leads['Desenlace'] == DES_DERIVADO].copy()
+            if not reas.empty:
+                divider()
+                con_monto = (reas['Monto'] != 'Sin dato').mean() * 100
+                con_broker = (reas['Broker'] != 'Sin dato').mean() * 100
+                section_header(
+                    "REASIGNACIONES", "Cuánto Patrimonio y Qué Broker se le Pasa a la Mesa",
+                    subtitle="Una reasignación no vale lo mismo que otra. Este es el único "
+                             "desenlace con el perfil cargado: para pasarle un lead a un asesor "
+                             f"hay que saber cuánto maneja y dónde opera, y de hecho "
+                             f"{con_monto:.0f}% tiene monto y {con_broker:.0f}% tiene broker. "
+                             "En las ventas de membresía y consultoría esa etiqueta no se carga.")
+
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("Reasignados", f"{len(reas):,}")
+                tramo_top = (reas[reas['Monto'] != 'Sin dato']['Monto'].value_counts()
+                             .reindex([t for t in TIERS]).dropna())
+                k2.metric("Tramo más frecuente",
+                          tramo_top.idxmax() if len(tramo_top) else "s/d",
+                          f"{int(tramo_top.max())} de {len(reas)}" if len(tramo_top) else None)
+                brk_top = reas[reas['Broker'] != 'Sin dato']['Broker'].value_counts()
+                k3.metric("Broker más frecuente", brk_top.idxmax() if len(brk_top) else "s/d",
+                          f"{int(brk_top.max())} de {len(reas)}" if len(brk_top) else None)
+                hs = reas['Horas a Derivación'].median()
+                k4.metric("Demora mediana a la mesa",
+                          f"{hs/24:.1f} días" if pd.notna(hs) else "s/d",
+                          help="Desde el primer mensaje al comercial hasta que aparece "
+                               "conversando en la línea de asesores.")
+
+                # Los tramos altos son pocos casos: conviene decirlo antes de que
+                # alguien lea una tendencia donde hay tres personas.
+                altos = int(reas['Monto'].isin(TIERS[2:]).sum())
+                if 0 < altos < 10:
+                    st.caption(f"De patrimonio alto (100K USD en adelante) hay **{altos} casos**. "
+                               "Alcanza para describirlos uno por uno, no para sacar porcentajes.")
+
+                f_perfil = fig_reasignaciones_perfil(reas)
+                if f_perfil is not None:
+                    grafico(f_perfil, "Perfil de las reasignaciones", "reasignaciones")
+
+                st.markdown("###### Filtrar las reasignaciones")
+                fc1, fc2 = st.columns(2)
+                tramos_disp = [t for t in TIERS if t in set(reas['Monto'])]
+                if 'Sin dato' in set(reas['Monto']):
+                    tramos_disp.append('Sin dato')
+                brokers_disp = sorted(set(reas['Broker']))
+                with fc1:
+                    f_monto = st.multiselect("Tramo de patrimonio:", tramos_disp,
+                                             default=tramos_disp, key="f_monto_reas")
+                with fc2:
+                    f_brk = st.multiselect("Broker:", brokers_disp, default=brokers_disp,
+                                           key="f_broker_reas")
+
+                sel = reas[reas['Monto'].isin(f_monto) & reas['Broker'].isin(f_brk)].copy()
+                if sel.empty:
+                    st.info("Ningún lead reasignado cumple los dos filtros a la vez.")
+                else:
+                    pct = len(sel) / len(reas) * 100
+                    st.caption(f"**{len(sel)}** de {len(reas)} reasignaciones ({pct:.0f}%) "
+                               "en la selección.")
+                    vis = sel.sort_values('Primer Chat', ascending=False).copy()
+                    vis['Primer Chat'] = vis['Primer Chat'].dt.strftime('%d/%m %H:%M')
+                    vis['A la mesa'] = vis['Horas a Derivación'].map(
+                        lambda h: '—' if pd.isna(h) else (f"{h:.0f} h" if h < 48
+                                                          else f"{h/24:.0f} días"))
+                    st.dataframe(
+                        vis[['contactName', 'Monto', 'Broker', 'Asesor', 'Primer Chat',
+                             'A la mesa', 'Conversaciones']].rename(columns={
+                                'contactName': 'Lead', 'Asesor': 'Atendió en comercial',
+                                'Conversaciones': 'Chats'}),
+                        hide_index=True, **ANCHO)
 
             divider()
 
