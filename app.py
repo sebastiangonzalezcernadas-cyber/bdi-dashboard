@@ -221,7 +221,14 @@ TAG_CONSULTORIA_COMERCIAL = 'consultoriacomercial'
 TAGS_DERIVADO = ('derivado', 'derivadoaasesor', 'derivadoasesor', 'derivadoaasesores')
 TAGS_CLIENTE_EXISTENTE = ('membresia', 'membresiabdi', 'membresiaplus', 'consultoria')
 TAG_NO_CALIFICA = 'nocalifica'
-TAGS_EN_PROCESO = ('enproceso', 'engestion', 'seguimiento', 'enseguimiento')
+# «Potencial Cliente» es la que el equipo usa en la práctica para el lead que
+# todavía está en gestión (17 usos en el export del 03/11); las otras quedan
+# por compatibilidad si alguien las escribe de otra forma.
+TAGS_EN_PROCESO = ('enproceso', 'engestion', 'seguimiento', 'enseguimiento',
+                   'potencialcliente', 'potencialclientes')
+# El que fue cliente y se fue, o el que explícitamente no lo es, no son leads
+# nuevos ni ganados: se separan para que no inflen ni el embudo ni la conversión.
+TAGS_EX_CLIENTE = ('excliente', 'exclientes', 'noescliente', 'nocliente')
 
 DES_MEMBRESIA = 'Membresía - Comercial'
 DES_CONSULTORIA = 'Consultoría - Comercial'
@@ -252,6 +259,33 @@ ESTADO_COLORS = {'Potencial Cliente': '#C9A227', 'EX CLIENTE': '#AEB6B2', 'no es
 # Conexiones (líneas de WhatsApp). Los colores se asignan por volumen en runtime,
 # así una línea nueva se pinta sola sin tocar el código.
 CONEXION_PALETA = ['#0F5132', '#C9A227', '#3AAFB9', '#8FBF74', '#D6336C', '#0B3D66', '#5BC49A']
+
+# ===========================================================
+# CALENDARIO DE PUBLICACIONES
+# ===========================================================
+# Una planilla más en la MISMA carpeta de Drive, con las fechas de lo que se
+# publica (videos, reels, mailings). No cambia nada del vínculo con Drive: es
+# una lectura adicional. Columnas esperadas, con nombres tolerantes:
+#     fecha | titulo | canal
+# Si el archivo no existe, la app funciona igual y lo dice.
+EVENTOS_PATRONES = ('evento', 'publicacion', 'publicaciones', 'calendario')
+EVENTOS_COLS = {
+    'fecha': ('fecha', 'date', 'dia', 'día', 'fechapublicacion', 'fechadepublicacion'),
+    'titulo': ('titulo', 'título', 'nombre', 'publicacion', 'publicación', 'contenido',
+               'descripcion', 'descripción', 'que', 'qué'),
+    'canal': ('canal', 'plataforma', 'medio', 'donde', 'dónde', 'red'),
+}
+# Ventana por defecto para atribuirle leads a una publicación. 7 días cubre el
+# 81% de las conversiones medidas; más allá de eso el ruido se come la señal.
+VENTANA_ATRIBUCION_DIAS = 7
+# Un día se marca como pico solo si cumple LAS DOS condiciones:
+#   - supera el umbral de Poisson sobre su propio día de semana, y
+#   - el exceso en leads absolutos llega a este piso.
+# Sin el piso, un sábado que pasa de 1 a 4 leads se marcaba como pico: tres
+# personas de más no son una campaña. El piso es poco más de medio día normal.
+PICO_EXCESO_MINIMO = 5
+# Semanas mínimas de ese día de semana antes de confiar en una línea de base.
+PICO_BASE_MINIMA = 3
 
 NOMBRE_A_NUM = {
     'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
@@ -701,9 +735,19 @@ def firma_local():
 # CAPA 3 · LECTURA Y PROCESAMIENTO
 # -----------------------------------------------------------
 @st.cache_data(show_spinner="Leyendo planillas…")
+def es_archivo_eventos(nombre):
+    """El calendario de publicaciones vive en la misma carpeta que los exports."""
+    base = normalizar_tag(os.path.splitext(nombre)[0])
+    return any(p in base for p in EVENTOS_PATRONES)
+
 def leer_planillas(firma):
     dfs, log = [], []
     for nombre, _, _ in firma:
+        # El calendario de publicaciones no es un export del CRM. Se saltea en
+        # silencio: sin esto, caería en el control de columnas mínimas y
+        # ensuciaría el log con un error que no es un error.
+        if es_archivo_eventos(nombre):
+            continue
         path = os.path.join(DATA_DIR, nombre)
         try:
             d = pd.read_excel(path)
@@ -724,6 +768,62 @@ def leer_planillas(firma):
     if not dfs:
         return pd.DataFrame(), log
     return pd.concat(dfs, ignore_index=True), log
+
+@st.cache_data(show_spinner=False)
+def leer_eventos(firma):
+    """Calendario de publicaciones desde la planilla de Drive.
+
+    Tolerante a propósito: lo va a editar gente distinta a mano. Acepta variantes
+    del nombre de cada columna, fechas en cualquier formato que pandas entienda,
+    y filas a medio llenar. Lo que no se entiende se descarta avisando cuál fila,
+    en vez de romper el tablero entero.
+    """
+    log = []
+    for nombre, _, _ in firma:
+        if not es_archivo_eventos(nombre):
+            continue
+        try:
+            d = pd.read_excel(os.path.join(DATA_DIR, nombre))
+        except Exception as e:
+            log.append(("error", f"«{nombre}» no se pudo abrir → {type(e).__name__}: {e}"))
+            continue
+
+        mapa = {}
+        for destino, variantes in EVENTOS_COLS.items():
+            for c in d.columns:
+                if normalizar_tag(c) in [normalizar_tag(v) for v in variantes]:
+                    mapa[c] = destino
+                    break
+        d = d.rename(columns=mapa)
+        if 'fecha' not in d.columns:
+            log.append(("error", f"«{nombre}» no tiene una columna de fecha reconocible. "
+                                 f"Columnas encontradas: {list(d.columns)[:6]}. "
+                                 "Renombrá la de fechas a «fecha»."))
+            continue
+
+        d['fecha'] = pd.to_datetime(d['fecha'], errors='coerce', dayfirst=True)
+        malas = int(d['fecha'].isna().sum())
+        d = d[d['fecha'].notna()].copy()
+        if malas:
+            log.append(("warn", f"«{nombre}»: {malas} fila(s) con fecha ilegible, se omiten."))
+        if d.empty:
+            log.append(("warn", f"«{nombre}» no tiene ninguna fila con fecha válida."))
+            continue
+
+        d['titulo'] = (d['titulo'].astype(str).str.strip() if 'titulo' in d.columns
+                       else 'Publicación')
+        d.loc[d['titulo'].isin(['', 'nan', 'None']), 'titulo'] = 'Publicación'
+        d['canal'] = (d['canal'].astype(str).str.strip() if 'canal' in d.columns else '')
+        d.loc[d['canal'].isin(['nan', 'None']), 'canal'] = ''
+        d['dia'] = d['fecha'].dt.normalize()
+        d = d.sort_values('fecha').reset_index(drop=True)
+        log.append(("ok", f"Calendario «{nombre}»: {len(d)} publicación(es) cargadas."))
+        return d[['fecha', 'dia', 'titulo', 'canal']], log
+
+    log.append(("warn", "No hay calendario de publicaciones en la carpeta de Drive. "
+                        "Subí un «eventos.xlsx» con columnas fecha, titulo y canal para "
+                        "poder marcar los días en el gráfico."))
+    return pd.DataFrame(columns=['fecha', 'dia', 'titulo', 'canal']), log
 
 def dias_habiles_efectivos(serie_fechas):
     """Días hábiles reales de los meses presentes, respetando meses parciales.
@@ -805,24 +905,52 @@ def analizar_captacion(df_linea, df_historia, linea):
         crudas = [t.strip() for x in g['tags'].dropna().astype(str) for t in x.split(',') if t.strip()]
         normalizadas = {normalizar_tag(t) for t in crudas}
 
+        # Momento exacto del desenlace. Para las etiquetas de venta es la primera
+        # conversación del lead que la lleva; para la derivación, el primer chat
+        # en la línea de asesores. Se guarda aparte de la fecha de entrada porque
+        # el gráfico de atribución fecha todo por ENTRADA: lo que trae un video es
+        # gente que escribe, y el cierre llega después.
+        def _cuando(tag):
+            hit = g[g['tags'].fillna('').astype(str).map(
+                lambda s: tag in {normalizar_tag(t) for t in s.split(',') if t.strip()})]
+            return hit['createdAt_dt'].min() if len(hit) else pd.NaT
+
         if TAG_MEMBRESIA_COMERCIAL in normalizadas:
             desenlace = DES_MEMBRESIA
+            cuando = _cuando(TAG_MEMBRESIA_COMERCIAL)
         elif TAG_CONSULTORIA_COMERCIAL in normalizadas:
             desenlace = DES_CONSULTORIA
+            cuando = _cuando(TAG_CONSULTORIA_COMERCIAL)
         elif normalizadas & set(TAGS_CLIENTE_EXISTENTE):
             # Ya tenía membresía o consultoría: escribe por una consulta, no es un lead.
             desenlace = DES_CLIENTE
+            cuando = pd.NaT
+        elif normalizadas & set(TAGS_EX_CLIENTE):
+            # «EX CLIENTE» / «no es cliente»: tampoco es un lead nuevo captado.
+            desenlace = DES_CLIENTE
+            cuando = pd.NaT
         elif TAG_NO_CALIFICA in normalizadas:
             desenlace = DES_NO_CALIFICA
+            cuando = pd.NaT
         elif (normalizadas & set(TAGS_DERIVADO)) or estado == 'Derivado a asesores':
             # Vale la etiqueta manual o la evidencia: el contacto aparece después
             # conversando en la línea de asesores.
             desenlace = DES_DERIVADO
+            cuando = ref if estado == 'Derivado a asesores' else pd.NaT
         elif normalizadas & set(TAGS_EN_PROCESO):
             # Conversación abierta: todavía no se decidió. No es lo mismo que no etiquetar.
             desenlace = DES_EN_PROCESO
+            cuando = pd.NaT
         else:
             desenlace = DES_SIN_DEFINIR
+            cuando = pd.NaT
+
+        # Monto y broker se toman de la UNIÓN de etiquetas del contacto: el perfil
+        # suele cargarse en una conversación distinta de la que lleva el cierre.
+        tiers_lead = [t for t in TIERS if normalizar_tag(t) in normalizadas]
+        brokers_lead = sorted({b for x in g['brokers'].dropna()
+                               for b in (x if isinstance(x, (list, tuple, set)) else [x])
+                               if str(b).strip()})
 
         filas.append({
             'contactNumber': contacto,
@@ -835,6 +963,11 @@ def analizar_captacion(df_linea, df_historia, linea):
             'Respondido': pd.notna(frt),
             'Estado': estado,
             'Desenlace': desenlace,
+            'Fecha Desenlace': cuando,
+            'Horas a Desenlace': ((cuando - primer_chat).total_seconds() / 3600
+                                  if pd.notna(cuando) and pd.notna(primer_chat) else np.nan),
+            'Monto': tiers_lead[0] if tiers_lead else 'Sin dato',
+            'Broker': brokers_lead[0] if brokers_lead else 'Sin dato',
             'Etiquetas': ', '.join(sorted(set(crudas))),
             'Horas a Derivación': horas,
             'hora_ingreso': primer_chat.hour if pd.notna(primer_chat) else np.nan,
@@ -878,18 +1011,34 @@ def metricas_usuario_por_conexion(df):
         return pd.DataFrame()
     return pd.concat(partes, ignore_index=True).sort_values(['Conexión', 'Chats'], ascending=[True, False])
 
+def _lineas_con_volumen(df):
+    """Conexiones con volumen suficiente para analizarse como una línea.
+
+    Sin este filtro, UNA fila suelta sin connectionId se convierte en una
+    "conexión" con 100% de contactos nuevos y le gana la detección de captación
+    a la línea comercial real. Pasó con el export del 03/11: una fila con
+    connectionId vacío daba isNewContact=1.0 contra el 0.66 del comercial, y toda
+    la solapa comercial habría analizado esa única conversación.
+    """
+    if df.empty or 'conexion' not in df.columns:
+        return pd.Series(dtype=int)
+    vol = df.groupby('conexion')[COL_ID].nunique()
+    vol = vol[vol.index != 'Sin Conexión']
+    piso = max(10, int(0.005 * df[COL_ID].nunique()))
+    return vol[vol >= piso] if (vol >= piso).any() else vol
+
 def detectar_linea_captacion(df):
     """La línea con mayor proporción de contactos nuevos es, por definición, la de captación."""
-    if df.empty or df['conexion'].nunique() == 0:
+    vol = _lineas_con_volumen(df)
+    if vol.empty:
         return None
-    ranking = df.groupby('conexion')['isNewContact'].mean().sort_values(ascending=False)
-    return ranking.index[0]
+    cand = df[df['conexion'].isin(vol.index)]
+    return cand.groupby('conexion')['isNewContact'].mean().sort_values(ascending=False).index[0]
 
 def detectar_linea_principal(df):
     """La línea de cartera: la de mayor volumen de conversaciones."""
-    if df.empty or df['conexion'].nunique() == 0:
-        return None
-    return df.groupby('conexion')[COL_ID].nunique().sort_values(ascending=False).index[0]
+    vol = _lineas_con_volumen(df)
+    return None if vol.empty else vol.sort_values(ascending=False).index[0]
 
 def resumen_por_conexion(df):
     """Métricas normalizadas por línea. Cada conexión se mide sobre SUS días activos,
@@ -1142,6 +1291,173 @@ def fig_composicion_mensual(d, periodos_orden, top_n=5, para_pdf=False):
         yaxis=dict(range=[0, total_max * (1.30 if fuera else 1.06)]),
         uniformtext=dict(minsize=11, mode='show')
     )
+    return fig
+
+# -----------------------------------------------------------
+# ATRIBUCIÓN DE LEADS A PUBLICACIONES
+# -----------------------------------------------------------
+def serie_diaria_leads(leads, hasta=None):
+    """Leads por día, fechados por el PRIMER mensaje del contacto, sin huecos.
+
+    Fechar por entrada y no por cierre es la decisión central: lo que mueve una
+    publicación es gente que escribe. El cierre llega después (mediana 1 día,
+    p90 12), y fechar por cierre corre el efecto hacia adelante y lo reparte.
+    """
+    if leads.empty or 'Primer Chat' not in leads.columns:
+        return pd.DataFrame(columns=['dia', 'leads', 'ganados', 'dow', 'parcial'])
+    e = pd.to_datetime(leads['Primer Chat']).dt.normalize()
+    ini, fin = e.min(), (pd.Timestamp(hasta).normalize() if hasta is not None else e.max())
+    idx = pd.date_range(ini, fin, freq='D')
+    gan = leads['Desenlace'].isin(DESENLACES_GANADOS)
+    s = pd.DataFrame({'dia': idx})
+    s['leads'] = s['dia'].map(e.value_counts()).fillna(0).astype(int)
+    s['ganados'] = s['dia'].map(e[gan].value_counts()).fillna(0).astype(int)
+    s['dow'] = s['dia'].dt.dayofweek
+    # El último día del export siempre está cortado a la hora en que se bajó:
+    # cuenta como dato parcial y no puede ensuciar ninguna línea de base.
+    s['parcial'] = s['dia'] == s['dia'].max()
+    return s
+
+def _ventanas(eventos, serie, dias):
+    """Ventana de cada publicación: desde su día hasta `dias` después, cortada si
+    aparece otra publicación antes. Sin el corte, dos videos de la misma semana se
+    atribuyen los mismos leads y la suma da más que el total real."""
+    if eventos.empty or serie.empty:
+        return []
+    fin_serie = serie['dia'].max()
+    dias_ev = sorted(eventos['dia'].unique())
+    out = []
+    for i, d0 in enumerate(dias_ev):
+        tope = d0 + pd.Timedelta(days=dias - 1)
+        if i + 1 < len(dias_ev):
+            tope = min(tope, dias_ev[i + 1] - pd.Timedelta(days=1))
+        out.append((pd.Timestamp(d0), min(tope, fin_serie)))
+    return out
+
+def linea_base(serie, ventanas, semanas=4, minimo=PICO_BASE_MINIMA):
+    """Esperado de cada día: mediana de ESE día de la semana en las semanas previas.
+
+    Dos cuidados que cambian el resultado:
+      - Los días que caen dentro de la ventana de una publicación no entran en la
+        base. Si entraran, cada evento elevaría su propio esperado y se borraría.
+      - El último día del export está cortado y tampoco entra.
+    El lunes corre al 166% del promedio y el domingo al 59%: comparar contra un
+    promedio plano marca "picos" que son simplemente lunes.
+    """
+    s = serie.copy()
+    dentro = pd.Series(False, index=s.index)
+    for a, b in ventanas:
+        dentro |= s['dia'].between(a, b)
+    s['limpio'] = (~dentro) & (~s['parcial'])
+
+    esperado = []
+    for i, r in s.iterrows():
+        prev = s[(s['dow'] == r['dow']) & (s['dia'] < r['dia']) & s['limpio']]['leads']
+        if len(prev) < minimo:
+            prev = s[(s['dow'] == r['dow']) & (s['dia'] < r['dia']) & (~s['parcial'])]['leads']
+        esperado.append(prev.tail(semanas).median() if len(prev) >= minimo else np.nan)
+    s['esperado'] = esperado
+    # Umbral de Poisson: con conteos chicos el desvío es la raíz del esperado.
+    s['umbral'] = s['esperado'] + 2 * np.sqrt(s['esperado'].clip(lower=1))
+    s['exceso'] = s['leads'] - s['esperado']
+    s['pico'] = ((s['leads'] > s['umbral']) & (s['exceso'] >= PICO_EXCESO_MINIMO)
+                 & (~s['parcial']) & s['esperado'].notna())
+    return s
+
+def atribuir(leads, eventos, serie_base, dias=VENTANA_ATRIBUCION_DIAS):
+    """Una fila por publicación: observados, esperados, incrementales y ganados."""
+    if eventos.empty or leads.empty:
+        return pd.DataFrame()
+    e = pd.to_datetime(leads['Primer Chat']).dt.normalize()
+    ventanas = _ventanas(eventos, serie_base, dias)
+    s = linea_base(serie_base, ventanas)
+    filas = []
+    for (a, b), (_, ev) in zip(ventanas, eventos.drop_duplicates('dia').iterrows()):
+        tramo = s[s['dia'].between(a, b)]
+        en_ventana = e.between(a, b)
+        sub = leads[en_ventana.values]
+        obs = int(tramo['leads'].sum())
+        esp = tramo['esperado'].sum()
+        gan = int(sub['Desenlace'].isin(DESENLACES_GANADOS).sum())
+        filas.append({
+            'Fecha': a, 'Publicación': ev['titulo'], 'Canal': ev['canal'],
+            'Días': len(tramo),
+            'Leads observados': obs,
+            'Esperados sin publicar': round(esp, 1) if pd.notna(esp) else np.nan,
+            'Incrementales': round(obs - esp, 1) if pd.notna(esp) else np.nan,
+            'Ganados': gan,
+            'Parcial': bool(tramo['parcial'].any()),
+        })
+    return pd.DataFrame(filas)
+
+def fig_leads_con_eventos(serie, eventos, para_pdf=False):
+    """Barras diarias de leads con las publicaciones marcadas.
+
+    Cada barra lleva su número impreso y cada publicación su etiqueta: en el PDF
+    no hay hover, así que nada puede quedar solo en el tooltip.
+    """
+    if serie.empty:
+        return None
+    s = serie.copy()
+    perdidos = s['leads'] - s['ganados']
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=s['dia'], y=perdidos, name='No convertidos aún',
+        marker=dict(color='#C9D2CE', line=dict(color='#FFFFFF', width=0.5)),
+        hovertemplate="%{x|%d/%m}<br>%{y} sin convertir<extra></extra>"))
+    fig.add_trace(go.Bar(
+        x=s['dia'], y=s['ganados'], name='Ganados',
+        marker=dict(color='#0F5132', line=dict(color='#FFFFFF', width=0.5)),
+        hovertemplate="%{x|%d/%m}<br>%{y} ganados<extra></extra>"))
+    # Los dos números van ARRIBA de la barra, en dos renglones. Adentro del
+    # segmento verde plotly los rotaba 90° en cuanto la porción era finita, y un
+    # número de costado en un PDF es un número perdido.
+    etiquetas = [f"{t}<br>({g})" if g else (str(t) if t else '')
+                 for t, g in zip(s['leads'], s['ganados'])]
+    fig.add_trace(go.Scatter(
+        x=s['dia'], y=s['leads'], mode='text', text=etiquetas,
+        textposition='top center', textfont=dict(size=10 if para_pdf else 9, color='#1A252C'),
+        showlegend=False, hoverinfo='skip'))
+
+    if 'esperado' in s.columns and s['esperado'].notna().any():
+        fig.add_trace(go.Scatter(
+            x=s['dia'], y=s['esperado'], mode='lines', name='Esperado para ese día de semana',
+            line=dict(color='#C9A227', width=2, dash='dot'),
+            hovertemplate="%{x|%d/%m}<br>esperado %{y:.1f}<extra></extra>"))
+
+    tope = max(s['leads'].max(), 1)
+    # Las etiquetas de publicación se escalonan en tres alturas para que dos
+    # publicaciones de días seguidos no se pisen.
+    for i, (_, ev) in enumerate(eventos.drop_duplicates('dia').iterrows()):
+        if not (s['dia'].min() <= ev['dia'] <= s['dia'].max()):
+            continue
+        # La línea va al BORDE IZQUIERDO de la barra de ese día, no a su centro:
+        # trazada en el centro partía al medio el número impreso arriba («36 (5)»
+        # se leía «3₆($)») y además tapaba la barra que justamente hay que mirar.
+        borde = ev['dia'] - pd.Timedelta(hours=12)
+        fig.add_vline(x=borde, line=dict(color='#D6336C', width=1.4, dash='dash'))
+        etiqueta = ev['titulo'] if not ev['canal'] else f"{ev['titulo']} · {ev['canal']}"
+        fig.add_annotation(
+            x=borde, y=tope * (1.30 - 0.11 * (i % 3)), text=etiqueta[:38],
+            showarrow=True, arrowhead=0, arrowwidth=1.2, arrowcolor='#D6336C',
+            ax=0, ay=-14, font=dict(size=10 if para_pdf else 9, color='#D6336C'),
+            bgcolor='rgba(255,255,255,0.86)', borderpad=2, align='center')
+
+    fig.update_layout(
+        barmode='stack', height=430,
+        title=dict(text="Leads que entraron cada día y qué publicación los precede",
+                   font=dict(color='#0F5132', size=19), x=0.01, xanchor='left'),
+        xaxis=dict(title="", tickformat='%d/%m', dtick=86400000.0 * 2, tickangle=-45,
+                   tickfont=dict(size=10)),
+        yaxis=dict(title="Leads nuevos", range=[0, tope * 1.52]),
+        legend=dict(orientation='h', yanchor='top', y=-0.28, xanchor='center', x=0.5,
+                    title=dict(text="Arriba de cada barra: leads del día y, entre "
+                                    "paréntesis, cuántos ya convirtieron   ")),
+        margin=dict(t=95, b=110, l=60, r=30),
+        paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=12),
+        uniformtext=dict(minsize=9, mode='show'))
     return fig
 
 def fig_patrimonio_por_asesor(d, para_pdf=False):
@@ -1984,6 +2300,7 @@ archivos_drive, log_listado, listado_en_vivo = listar_archivos_drive()
 log_descarga, manifest = sincronizar_archivos(archivos_drive, forzar=forzar,
                                               listado_en_vivo=listado_en_vivo)
 df_drive_raw, log_lectura = leer_planillas(firma_local())
+eventos_df, log_eventos = leer_eventos(firma_local())
 
 uploaded_files = st.sidebar.file_uploader("📂 O cargar planilla .xlsx manualmente:",
                                           type=["xlsx"], accept_multiple_files=True)
@@ -3206,6 +3523,96 @@ with tab_com:
                 grafico(fig_fh, 'Hora de entrada vs demora', 'comercial')
             st.caption("💡 Las horas donde la barra es alta y la línea dorada también lo es son las ventanas "
                        "a cubrir primero: ahí entra volumen y se responde tarde.")
+
+            divider()
+
+            # =======================================================
+            # ATRIBUCIÓN: QUÉ TRAJO CADA PUBLICACIÓN
+            # =======================================================
+            section_header(
+                "ATRIBUCIÓN", "Qué Publicación Precede a Cada Pico de Leads",
+                subtitle="Cada lead se fecha por el momento exacto en que escribió por primera vez, "
+                         "no por el día en que cerró. Lo que mueve una publicación es gente que "
+                         "escribe; el cierre llega después y fecharlo ahí correría el efecto.")
+
+            ventana_dias = st.slider(
+                "Días que se le atribuyen a cada publicación:", 1, 21, VENTANA_ATRIBUCION_DIAS,
+                help="La ventana se corta sola si aparece otra publicación antes, así dos "
+                     "piezas de la misma semana no se cuentan los mismos leads. "
+                     "7 días cubren el 81% de las conversiones medidas.")
+
+            serie_leads = serie_diaria_leads(leads, hasta=df_cap['createdAt_dt'].max())
+            vent_ev = _ventanas(eventos_df, serie_leads, ventana_dias)
+            serie_leads = linea_base(serie_leads, vent_ev)
+
+            if eventos_df.empty:
+                st.info(
+                    "**Todavía no hay calendario de publicaciones.** Subí a la misma carpeta de "
+                    "Drive un archivo llamado **eventos.xlsx** con tres columnas — `fecha`, "
+                    "`titulo` y `canal` — y cada fila va a dibujarse como una línea vertical en "
+                    "el gráfico, con su atribución calculada abajo. El gráfico ya funciona sin "
+                    "él: marca los picos por su cuenta.", icon="📅")
+
+            f_ev = fig_leads_con_eventos(serie_leads, eventos_df)
+            if f_ev is not None:
+                grafico(f_ev, "Leads por día con publicaciones", "atribucion")
+
+            picos = serie_leads[serie_leads['pico']]
+            if not picos.empty:
+                sin_marcar = picos[~picos['dia'].isin(eventos_df['dia'])] if not eventos_df.empty else picos
+                if not sin_marcar.empty:
+                    lista = ", ".join(
+                        f"**{d:%d/%m}** ({int(n)} leads, esperaba {e:.0f})"
+                        for d, n, e in zip(sin_marcar['dia'], sin_marcar['leads'], sin_marcar['esperado']))
+                    st.warning(
+                        f"Estos días tuvieron un pico que no tiene ninguna publicación cargada: "
+                        f"{lista}. Si sabés qué salió esos días, cargalo en el calendario.", icon="🔎")
+
+            if not eventos_df.empty:
+                tabla_atr = atribuir(leads, eventos_df, serie_diaria_leads(
+                    leads, hasta=df_cap['createdAt_dt'].max()), ventana_dias)
+                if not tabla_atr.empty:
+                    st.markdown("###### Cuántos leads le corresponden a cada publicación")
+                    st.caption(
+                        "**Esperados** es la mediana de ese mismo día de la semana en las semanas "
+                        "previas, dejando afuera los días que ya pertenecen a otra publicación. "
+                        "**Incrementales** es la diferencia: los leads que no se explican por el "
+                        "ritmo normal de ese día. El lunes corre al 166% del promedio y el domingo "
+                        "al 59%, así que comparar contra un promedio plano marcaría como pico "
+                        "cualquier lunes.")
+                    vis = tabla_atr.copy()
+                    vis['Fecha'] = vis['Fecha'].dt.strftime('%d/%m/%Y')
+                    vis['Conversión'] = [
+                        f"{g/o*100:.0f}% ({g}/{o})" if o else "—"
+                        for g, o in zip(vis['Ganados'], vis['Leads observados'])]
+                    if vis['Parcial'].any():
+                        st.caption("⚠️ Las filas marcadas incluyen el último día del export, que está "
+                                   "cortado a la hora de la descarga: su ventana todavía no cerró.")
+                    vis['Publicación'] = np.where(vis['Parcial'], vis['Publicación'] + ' ⚠️',
+                                                  vis['Publicación'])
+                    st.dataframe(
+                        vis[['Fecha', 'Publicación', 'Canal', 'Días', 'Leads observados',
+                             'Esperados sin publicar', 'Incrementales', 'Conversión']],
+                        hide_index=True, **ANCHO)
+                    st.caption(
+                        "Un lead que entra hoy tarda en resolverse: 50% el mismo día, 81% a los 7 "
+                        "días, 91% a los 14. La conversión de las publicaciones más recientes va a "
+                        "subir sola con el tiempo; no es que hayan rendido peor.")
+
+            with st.expander("Cómo se carga el calendario de publicaciones"):
+                st.markdown(
+                    "Un Excel en la **misma carpeta de Drive** que los exports del CRM, con el "
+                    "nombre `eventos.xlsx` (sirve cualquier nombre que contenga *evento*, "
+                    "*publicacion* o *calendario*). No hace falta tocar nada de la vinculación "
+                    "con Drive: es una lectura más.\n\n"
+                    "| fecha | titulo | canal |\n|---|---|---|\n"
+                    "| 2026-10-31 | Video energía nuclear | YouTube |\n"
+                    "| 2026-11-02 | Reel terapia / Hernán | Instagram |\n\n"
+                    "`titulo` y `canal` son opcionales. Las fechas se leen en cualquier formato "
+                    "razonable, con día primero. Una fila con fecha ilegible se saltea y se avisa "
+                    "cuál, en vez de romper el tablero.")
+                for nivel, msg in log_eventos:
+                    (st.success if nivel == 'ok' else st.warning if nivel == 'warn' else st.error)(msg)
 
             divider()
 
