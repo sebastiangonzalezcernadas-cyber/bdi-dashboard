@@ -275,9 +275,10 @@ EVENTOS_COLS = {
                'descripcion', 'descripción', 'que', 'qué'),
     'canal': ('canal', 'plataforma', 'medio', 'donde', 'dónde', 'red'),
 }
-# Ventana por defecto para atribuirle leads a una publicación. 7 días cubre el
-# 81% de las conversiones medidas; más allá de eso el ruido se come la señal.
-VENTANA_ATRIBUCION_DIAS = 7
+# La ventana de cada publicación termina cuando empieza la siguiente: mientras
+# no salga nada nuevo, lo que entra sigue siendo arrastre de lo último. No hay
+# tope de días a propósito — todo se mide contra la línea de base, así que una
+# ventana larga da observado ≈ esperado y el incremental tiende a cero solo.
 # Un día se marca como pico solo si cumple LAS DOS condiciones:
 #   - supera el umbral de Poisson sobre su propio día de semana, y
 #   - el exceso en leads absolutos llega a este piso.
@@ -1361,20 +1362,27 @@ def eventos_en_rango(eventos, serie):
     dentro = eventos['dia'].between(serie['dia'].min(), serie['dia'].max())
     return eventos[dentro].copy(), eventos[~dentro].copy()
 
-def _ventanas(eventos, serie, dias):
-    """Ventana de cada publicación: desde su día hasta `dias` después, cortada si
-    aparece otra publicación antes. Sin el corte, dos videos de la misma semana se
-    atribuyen los mismos leads y la suma da más que el total real."""
+def _ventanas(eventos, serie):
+    """Ventana de cada publicación: desde su día hasta el día anterior a la
+    siguiente publicación. La última corre hasta donde llegan los datos.
+
+    El corte lo marca la publicación que viene, no una cantidad fija de días:
+    mientras no salga nada nuevo, lo que entra sigue siendo arrastre de lo
+    último que se publicó. Así las ventanas nunca se superponen y la suma de
+    todas no puede pasarse del total de leads.
+
+    No lleva tope: una ventana larga no distorsiona nada, porque todo se mide
+    contra la línea de base. Si entre dos publicaciones pasan 40 días, esos 40
+    días van a dar observado ≈ esperado y el incremental tiende a cero solo.
+    """
     if eventos.empty or serie.empty:
         return []
     fin_serie = serie['dia'].max()
     dias_ev = sorted(eventos['dia'].unique())
     out = []
     for i, d0 in enumerate(dias_ev):
-        tope = d0 + pd.Timedelta(days=dias - 1)
-        if i + 1 < len(dias_ev):
-            tope = min(tope, dias_ev[i + 1] - pd.Timedelta(days=1))
-        out.append((pd.Timestamp(d0), min(tope, fin_serie)))
+        tope = (dias_ev[i + 1] - pd.Timedelta(days=1)) if i + 1 < len(dias_ev) else fin_serie
+        out.append((pd.Timestamp(d0), min(pd.Timestamp(tope), fin_serie)))
     return out
 
 def linea_base(serie, ventanas, semanas=4, minimo=PICO_BASE_MINIMA):
@@ -1392,6 +1400,11 @@ def linea_base(serie, ventanas, semanas=4, minimo=PICO_BASE_MINIMA):
     for a, b in ventanas:
         dentro |= s['dia'].between(a, b)
     s['limpio'] = (~dentro) & (~s['parcial'])
+    # Se guarda cuántos días quedaron libres: si las publicaciones son muy
+    # seguidas, casi todos los días pertenecen a alguna ventana y la base se
+    # calcula con poca evidencia. Eso SUBESTIMA los incrementales, porque el
+    # esperado termina contaminado por el efecto de las propias publicaciones.
+    s.attrs['dias_limpios'] = int(s['limpio'].sum())
 
     esperado = []
     for i, r in s.iterrows():
@@ -1407,12 +1420,12 @@ def linea_base(serie, ventanas, semanas=4, minimo=PICO_BASE_MINIMA):
                  & (~s['parcial']) & s['esperado'].notna())
     return s
 
-def atribuir(leads, eventos, serie_base, dias=VENTANA_ATRIBUCION_DIAS):
+def atribuir(leads, eventos, serie_base):
     """Una fila por publicación: observados, esperados, incrementales y ganados."""
     if eventos.empty or leads.empty:
         return pd.DataFrame()
     e = pd.to_datetime(leads['Primer Chat']).dt.normalize()
-    ventanas = _ventanas(eventos, serie_base, dias)
+    ventanas = _ventanas(eventos, serie_base)
     s = linea_base(serie_base, ventanas)
     filas = []
     for (a, b), (_, ev) in zip(ventanas, eventos.drop_duplicates('dia').iterrows()):
@@ -1474,30 +1487,46 @@ def fig_leads_con_eventos(serie, eventos, para_pdf=False):
             hovertemplate="%{x|%d/%m}<br>esperado %{y:.1f}<extra></extra>"))
 
     tope = max(s['leads'].max(), 1)
-    # Las etiquetas de publicación se escalonan en tres alturas para que dos
-    # publicaciones de días seguidos no se pisen.
-    for i, (_, ev) in enumerate(eventos.drop_duplicates('dia').iterrows()):
-        if not (s['dia'].min() <= ev['dia'] <= s['dia'].max()):
-            continue
+    # Las etiquetas de publicación se escalonan en alturas distintas SOLO cuando
+    # dos publicaciones están tan cerca en el tiempo que sus carteles chocarían.
+    # Escalonar siempre dejaba carteles flotando lejos de su línea sin necesidad.
+    evs = eventos.drop_duplicates('dia').sort_values('dia')
+    evs = evs[evs['dia'].between(s['dia'].min(), s['dia'].max())]
+    total_dias = max((s['dia'].max() - s['dia'].min()).days, 1)
+    nivel, previo = 0, None
+    for _, ev in evs.iterrows():
+        # Título y canal en renglones separados: en una sola línea el cartel se
+        # cortaba a mitad de palabra («...cartera - Noviembre · YouT»).
+        titulo = _acortar(pd.Series([ev['titulo']]), 34).iloc[0]
+        etiqueta = (f"<b>{titulo}</b>" if not ev['canal'] else
+                    f"<b>{titulo}</b><br><span style='font-size:9.5px'>{ev['canal']}</span>")
+        # Ancho aproximado del cartel, en días del eje, para saber si se pisa.
+        ancho_dias = len(titulo) * 0.52 * total_dias / 92
+        if previo is not None and (ev['dia'] - previo).days < ancho_dias:
+            nivel = (nivel + 1) % 3
+        else:
+            nivel = 0
+        previo = ev['dia']
         # La línea va al BORDE IZQUIERDO de la barra de ese día, no a su centro:
         # trazada en el centro partía al medio el número impreso arriba («36 (5)»
         # se leía «3₆($)») y además tapaba la barra que justamente hay que mirar.
         borde = ev['dia'] - pd.Timedelta(hours=12)
-        fig.add_vline(x=borde, line=dict(color='#D6336C', width=1.4, dash='dash'))
-        etiqueta = ev['titulo'] if not ev['canal'] else f"{ev['titulo']} · {ev['canal']}"
+        fig.add_vline(x=borde, line=dict(color='#D6336C', width=1.5, dash='dash'))
         fig.add_annotation(
-            x=borde, y=tope * (1.30 - 0.11 * (i % 3)), text=etiqueta[:38],
+            x=borde, y=tope * (1.46 - 0.15 * nivel), text=etiqueta,
             showarrow=True, arrowhead=0, arrowwidth=1.2, arrowcolor='#D6336C',
-            ax=0, ay=-14, font=dict(size=10 if para_pdf else 9, color='#D6336C'),
-            bgcolor='rgba(255,255,255,0.86)', borderpad=2, align='center')
+            ax=0, ay=-12, font=dict(size=11 if para_pdf else 10, color='#D6336C'),
+            bgcolor='rgba(255,255,255,0.93)', bordercolor='#F2C9D7', borderwidth=1,
+            borderpad=3, align='center', xanchor='center')
 
     fig.update_layout(
-        barmode='stack', height=430,
-        title=dict(text="Leads que entraron cada día y qué publicación los precede",
-                   font=dict(color='#0F5132', size=19), x=0.01, xanchor='left'),
+        barmode='stack', height=480, bargap=0.22,
+        title=dict(text="<b>Leads que entraron cada día y qué publicación los precede</b>",
+                   font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
         xaxis=dict(title="", tickformat='%d/%m', dtick=86400000.0 * 2, tickangle=-45,
-                   tickfont=dict(size=10)),
-        yaxis=dict(title="Leads nuevos", range=[0, tope * 1.52]),
+                   tickfont=dict(size=10), showgrid=False),
+        yaxis=dict(title="Leads nuevos", range=[0, tope * 1.70],
+                   showgrid=True, gridcolor='#EEF3F0', zeroline=False),
         legend=dict(orientation='h', yanchor='top', y=-0.28, xanchor='center', x=0.5,
                     title=dict(text="Arriba de cada barra: leads del día y, entre paréntesis, "
                                     "asesoramiento + producto   ")),
@@ -1508,7 +1537,7 @@ def fig_leads_con_eventos(serie, eventos, para_pdf=False):
         uniformtext=dict(minsize=9, mode='show'))
     return fig
 
-def composicion_por_evento(leads, eventos, serie, dias=VENTANA_ATRIBUCION_DIAS, hoy=None):
+def composicion_por_evento(leads, eventos, serie, hoy=None):
     """Una fila por publicación con la apertura de sus leads en los dos negocios.
 
     Incluye la madurez de la ventana: un evento de hace tres días tiene menos
@@ -1522,7 +1551,7 @@ def composicion_por_evento(leads, eventos, serie, dias=VENTANA_ATRIBUCION_DIAS, 
     e = pd.to_datetime(leads['Primer Chat']).dt.normalize()
     hoy = pd.Timestamp(hoy).normalize() if hoy is not None else serie['dia'].max()
     filas = []
-    for (a, b), (_, ev) in zip(_ventanas(eventos, serie, dias),
+    for (a, b), (_, ev) in zip(_ventanas(eventos, serie),
                                eventos.drop_duplicates('dia').iterrows()):
         sub = leads[e.between(a, b).values]
         if sub.empty:
@@ -1538,9 +1567,10 @@ def composicion_por_evento(leads, eventos, serie, dias=VENTANA_ATRIBUCION_DIAS, 
         dias_madurez = int((hoy - b).days)
         filas.append({
             'dia': a, 'orden': a,
-            'etiqueta': (f"{_acortar(pd.Series([ev['titulo']]), 34).iloc[0]}"
-                         f"<br><span style='font-size:10px'>"
-                         f"{a:%d/%m}{' · ' + ev['canal'] if ev['canal'] else ''}</span>"),
+            'etiqueta': (f"<b>{_acortar(pd.Series([ev['titulo']]), 32).iloc[0]}</b>"
+                         f"<br><span style='font-size:10.5px;color:#8A9A93'>"
+                         f"{a:%d/%m}{' · ' + ev['canal'] if ev['canal'] else ''}"
+                         f"</span>"),
             'titulo': ev['titulo'], 'canal': ev['canal'],
             'Escribieron': len(sub),
             'Ya eran clientes': int(es_cliente.sum()),
@@ -1596,27 +1626,32 @@ def fig_mix_por_evento(comp, modo='Cantidad', para_pdf=False):
             hovertemplate=f"<b>{p}</b><br>%{{x:.0f}}<extra></extra>"))
 
     # Total y madurez al final de cada barra: el número que cierra la lectura.
+    # Dos renglones para que el dato duro no compita con el aviso de madurez.
     tope = (100 if modo == 'Mix %' else c['Leads reales'].max())
     for y, (_, r) in zip(c['etiqueta'], c.iterrows()):
-        cola = (f"{int(r['Leads reales'])} leads · {r['Conversión %']:.0f}% cierre"
-                if pd.notna(r['Conversión %']) else f"{int(r['Leads reales'])} leads")
+        cierre = (f" · <b>{r['Conversión %']:.0f}%</b> cierre"
+                  if pd.notna(r['Conversión %']) else "")
+        cola = f"<b>{int(r['Leads reales'])}</b> leads{cierre}"
         if not r['maduro']:
-            cola += f"  ⏳ {int(r['dias_madurez'])}d"
-        fig.add_annotation(x=tope * 1.02, y=y, text=cola, showarrow=False,
-                           xanchor='left', font=dict(size=11 if para_pdf else 10,
-                                                     color='#5B6E67'))
-    alto = max(150 + 78 * len(c), 290)
+            cola += (f"<br><span style='color:#C9A227'>⏳ {int(r['dias_madurez'])} días · "
+                     f"todavía madurando</span>")
+        fig.add_annotation(x=tope * 1.025, y=y, text=cola, showarrow=False,
+                           xanchor='left', align='left',
+                           font=dict(size=11.5 if para_pdf else 10.5, color='#5B6E67'))
+    alto = max(140 + 92 * len(c), 300)
     fig.update_layout(
-        barmode='stack', height=alto,
-        title=dict(text=("Qué tipo de cliente trajo cada publicación"
-                         + ("" if modo == 'Cantidad' else " · mix comparable")),
-                   font=dict(color='#0F5132', size=19), x=0.01, xanchor='left'),
+        barmode='stack', height=alto, bargap=0.42,
+        title=dict(text=("<b>Qué tipo de cliente trajo cada publicación</b>"
+                         + ("" if modo == 'Cantidad' else "  ·  mix comparable")),
+                   font=dict(color='#0F5132', size=20), x=0.01, xanchor='left'),
         xaxis=dict(title=("% de los leads reales" if modo == 'Mix %' else "Leads reales"),
-                   range=[0, tope * 1.30], showgrid=True, gridcolor='#EEF3F0'),
-        yaxis=dict(title="", tickfont=dict(size=12)),
-        legend=dict(orientation='h', yanchor='top', y=-0.18 - 0.4 / len(c),
-                    xanchor='center', x=0.5, traceorder='normal'),
-        margin=dict(t=85, b=90, l=250, r=40),
+                   range=[0, tope * 1.42], showgrid=True, gridcolor='#EEF3F0',
+                   zeroline=False),
+        yaxis=dict(title="", tickfont=dict(size=12.5), ticklabelposition='outside'),
+        legend=dict(orientation='h', yanchor='top', y=-0.16 - 0.34 / len(c),
+                    xanchor='center', x=0.5, traceorder='normal',
+                    font=dict(size=12)),
+        margin=dict(t=90, b=100, l=265, r=50),
         paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=12),
@@ -3780,15 +3815,26 @@ with tab_com:
                          "no por el día en que cerró. Lo que mueve una publicación es gente que "
                          "escribe; el cierre llega después y fecharlo ahí correría el efecto.")
 
-            ventana_dias = st.slider(
-                "Días que se le atribuyen a cada publicación:", 1, 21, VENTANA_ATRIBUCION_DIAS,
-                help="La ventana se corta sola si aparece otra publicación antes, así dos "
-                     "piezas de la misma semana no se cuentan los mismos leads. "
-                     "7 días cubren el 81% de las conversiones medidas.")
+            # El calendario se relee solo: Drive se revisa cada 2 minutos y, si la
+            # planilla cambió de fecha de modificación, se vuelve a bajar y el
+            # caché se invalida. El botón es para no esperar esos 2 minutos.
+            c_cal, c_btn = st.columns([5, 1])
+            with c_cal:
+                if eventos_df.empty:
+                    st.caption("Calendario de publicaciones: **no encontrado** en la carpeta de Drive.")
+                else:
+                    st.caption(
+                        f"Calendario de publicaciones: **{len(eventos_df)} cargadas**, de "
+                        f"{eventos_df['dia'].min():%d/%m/%Y} a {eventos_df['dia'].max():%d/%m/%Y}. "
+                        "Se relee solo cuando editás la planilla en Drive.")
+            with c_btn:
+                st.button("🔄 Releer", key="btn_releer_eventos",
+                          on_click=marcar_sincronizacion, **ANCHO,
+                          help="Fuerza la relectura ahora, sin esperar la revisión automática.")
 
             serie_cruda = serie_diaria_leads(leads, hasta=df_cap['createdAt_dt'].max())
             eventos_rango, eventos_fuera = eventos_en_rango(eventos_df, serie_cruda)
-            vent_ev = _ventanas(eventos_rango, serie_cruda, ventana_dias)
+            vent_ev = _ventanas(eventos_rango, serie_cruda)
             serie_leads = linea_base(serie_cruda.copy(), vent_ev)
 
             if not eventos_fuera.empty:
@@ -3828,7 +3874,7 @@ with tab_com:
                         f"{lista}. Si sabés qué salió esos días, cargalo en el calendario.", icon="🔎")
 
             if not eventos_rango.empty:
-                tabla_atr = atribuir(leads, eventos_rango, serie_cruda.copy(), ventana_dias)
+                tabla_atr = atribuir(leads, eventos_rango, serie_cruda.copy())
                 if not tabla_atr.empty:
                     st.markdown("###### Cuántos leads le corresponden a cada publicación")
                     st.caption(
@@ -3856,10 +3902,18 @@ with tab_com:
                         "Un lead que entra hoy tarda en resolverse: 50% el mismo día, 81% a los 7 "
                         "días, 91% a los 14. La conversión de las publicaciones más recientes va a "
                         "subir sola con el tiempo; no es que hayan rendido peor.")
+                    libres = serie_leads.attrs.get('dias_limpios', 0)
+                    if libres < 0.3 * len(serie_leads):
+                        st.caption(
+                            f"⚠️ Solo **{libres} de {len(serie_leads)} días** quedan libres de "
+                            "alguna publicación, así que la línea de base se calcula con poca "
+                            "evidencia. Con publicaciones muy seguidas el esperado queda "
+                            "contaminado por el efecto de las propias piezas y los incrementales "
+                            "salen **subestimados**: son un piso, no una medición fina.")
 
                 # ---- Qué tipo de cliente trae cada publicación.
                 comp = composicion_por_evento(leads, eventos_rango, serie_cruda.copy(),
-                                              ventana_dias, hoy=df_cap['createdAt_dt'].max())
+                                              hoy=df_cap['createdAt_dt'].max())
                 if not comp.empty:
                     divider()
                     section_header(
