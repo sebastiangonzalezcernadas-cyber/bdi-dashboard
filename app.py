@@ -287,6 +287,33 @@ PICO_EXCESO_MINIMO = 5
 # Semanas mínimas de ese día de semana antes de confiar en una línea de base.
 PICO_BASE_MINIMA = 3
 
+# ===========================================================
+# LOS DOS NEGOCIOS QUE ENTRAN POR LA MISMA PUERTA
+# ===========================================================
+# Un lead que escribe al comercial termina en uno de dos lugares distintos, y no
+# son el mismo cliente ni el mismo negocio:
+#
+#   ASESORAMIENTO → se reasigna a la mesa de asesores. Opera por un broker y lo
+#                   que busca es que le manejen la cartera. Ingreso recurrente
+#                   por asesoramiento.
+#   PRODUCTO      → compra una membresía o una consultoría al comercial, sin
+#                   pasar a la mesa. Ingreso directo.
+#
+# Son excluyentes por construcción: la cascada de desenlaces evalúa primero las
+# etiquetas de venta, así que un reasignado que además cerró producto cuenta
+# como producto. Verificado sobre el export del 03/11: 0 casos ambiguos.
+NEG_ASESORAMIENTO = 'Asesoramiento (broker)'
+NEG_PRODUCTO = 'Membresía / Consultoría'
+NEGOCIO_COLORS = {NEG_ASESORAMIENTO: '#3AAFB9', NEG_PRODUCTO: '#0F5132'}
+
+def negocio_de(desenlace):
+    """A cuál de los dos negocios pertenece un desenlace ganado."""
+    if desenlace == DES_DERIVADO:
+        return NEG_ASESORAMIENTO
+    if desenlace in (DES_MEMBRESIA, DES_CONSULTORIA):
+        return NEG_PRODUCTO
+    return None
+
 NOMBRE_A_NUM = {
     'enero': 1, 'febrero': 2, 'marzo': 3, 'abril': 4, 'mayo': 5, 'junio': 6,
     'julio': 7, 'agosto': 8, 'septiembre': 9, 'setiembre': 9, 'octubre': 10,
@@ -1309,14 +1336,30 @@ def serie_diaria_leads(leads, hasta=None):
     ini, fin = e.min(), (pd.Timestamp(hasta).normalize() if hasta is not None else e.max())
     idx = pd.date_range(ini, fin, freq='D')
     gan = leads['Desenlace'].isin(DESENLACES_GANADOS)
+    ases = leads['Desenlace'] == DES_DERIVADO
+    prod = leads['Desenlace'].isin([DES_MEMBRESIA, DES_CONSULTORIA])
     s = pd.DataFrame({'dia': idx})
     s['leads'] = s['dia'].map(e.value_counts()).fillna(0).astype(int)
     s['ganados'] = s['dia'].map(e[gan].value_counts()).fillna(0).astype(int)
+    s['asesoramiento'] = s['dia'].map(e[ases].value_counts()).fillna(0).astype(int)
+    s['producto'] = s['dia'].map(e[prod].value_counts()).fillna(0).astype(int)
     s['dow'] = s['dia'].dt.dayofweek
     # El último día del export siempre está cortado a la hora en que se bajó:
     # cuenta como dato parcial y no puede ensuciar ninguna línea de base.
     s['parcial'] = s['dia'] == s['dia'].max()
     return s
+
+def eventos_en_rango(eventos, serie):
+    """Separa las publicaciones que caen dentro del período con datos.
+
+    Una publicación anterior a que existiera la línea comercial no se puede
+    atribuir: no hay serie contra la cual compararla. Se informa aparte en vez
+    de mostrarla con cero leads, que se leería como que no funcionó.
+    """
+    if eventos.empty or serie.empty:
+        return eventos.iloc[0:0], eventos
+    dentro = eventos['dia'].between(serie['dia'].min(), serie['dia'].max())
+    return eventos[dentro].copy(), eventos[~dentro].copy()
 
 def _ventanas(eventos, serie, dias):
     """Ventana de cada publicación: desde su día hasta `dias` después, cortada si
@@ -1406,14 +1449,19 @@ def fig_leads_con_eventos(serie, eventos, para_pdf=False):
         marker=dict(color='#C9D2CE', line=dict(color='#FFFFFF', width=0.5)),
         hovertemplate="%{x|%d/%m}<br>%{y} sin convertir<extra></extra>"))
     fig.add_trace(go.Bar(
-        x=s['dia'], y=s['ganados'], name='Ganados',
-        marker=dict(color='#0F5132', line=dict(color='#FFFFFF', width=0.5)),
-        hovertemplate="%{x|%d/%m}<br>%{y} ganados<extra></extra>"))
-    # Los dos números van ARRIBA de la barra, en dos renglones. Adentro del
-    # segmento verde plotly los rotaba 90° en cuanto la porción era finita, y un
-    # número de costado en un PDF es un número perdido.
-    etiquetas = [f"{t}<br>({g})" if g else (str(t) if t else '')
-                 for t, g in zip(s['leads'], s['ganados'])]
+        x=s['dia'], y=s['asesoramiento'], name=NEG_ASESORAMIENTO,
+        marker=dict(color=NEGOCIO_COLORS[NEG_ASESORAMIENTO], line=dict(color='#FFFFFF', width=0.5)),
+        hovertemplate="%{x|%d/%m}<br>%{y} a la mesa de asesores<extra></extra>"))
+    fig.add_trace(go.Bar(
+        x=s['dia'], y=s['producto'], name=NEG_PRODUCTO,
+        marker=dict(color=NEGOCIO_COLORS[NEG_PRODUCTO], line=dict(color='#FFFFFF', width=0.5)),
+        hovertemplate="%{x|%d/%m}<br>%{y} membresías o consultorías<extra></extra>"))
+    # Los números van ARRIBA de la barra, en dos renglones. Adentro del segmento
+    # plotly los rotaba 90° en cuanto la porción era finita, y un número de
+    # costado en un PDF es un número perdido. El segundo renglón desglosa los dos
+    # negocios: «(2+3)» son 2 de asesoramiento y 3 de producto.
+    etiquetas = [f"{t}<br>({a}+{p})" if (a or p) else (str(t) if t else '')
+                 for t, a, p in zip(s['leads'], s['asesoramiento'], s['producto'])]
     fig.add_trace(go.Scatter(
         x=s['dia'], y=s['leads'], mode='text', text=etiquetas,
         textposition='top center', textfont=dict(size=10 if para_pdf else 9, color='#1A252C'),
@@ -1451,13 +1499,206 @@ def fig_leads_con_eventos(serie, eventos, para_pdf=False):
                    tickfont=dict(size=10)),
         yaxis=dict(title="Leads nuevos", range=[0, tope * 1.52]),
         legend=dict(orientation='h', yanchor='top', y=-0.28, xanchor='center', x=0.5,
-                    title=dict(text="Arriba de cada barra: leads del día y, entre "
-                                    "paréntesis, cuántos ya convirtieron   ")),
+                    title=dict(text="Arriba de cada barra: leads del día y, entre paréntesis, "
+                                    "asesoramiento + producto   ")),
         margin=dict(t=95, b=110, l=60, r=30),
         paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=12),
         uniformtext=dict(minsize=9, mode='show'))
+    return fig
+
+def composicion_por_evento(leads, eventos, serie, dias=VENTANA_ATRIBUCION_DIAS, hoy=None):
+    """Una fila por publicación con la apertura de sus leads en los dos negocios.
+
+    Incluye la madurez de la ventana: un evento de hace tres días tiene menos
+    conversiones que uno de hace un mes por el solo hecho de ser reciente, no
+    porque haya traído peor gente. Comparar mixes sin mirar eso es el error
+    clásico. Con los lags medidos: 50% se resuelve en 1 día, 81% a los 7, 91% a
+    los 14.
+    """
+    if eventos.empty or leads.empty:
+        return pd.DataFrame()
+    e = pd.to_datetime(leads['Primer Chat']).dt.normalize()
+    hoy = pd.Timestamp(hoy).normalize() if hoy is not None else serie['dia'].max()
+    filas = []
+    for (a, b), (_, ev) in zip(_ventanas(eventos, serie, dias),
+                               eventos.drop_duplicates('dia').iterrows()):
+        sub = leads[e.between(a, b).values]
+        if sub.empty:
+            continue
+        # El que ya era cliente sale del embudo ANTES de abrir las categorías.
+        # Si no, un contacto que ya era cliente y encima quedó sin etiquetar se
+        # contaba dos veces y los segmentos sumaban más que los leads reales:
+        # las barras del mix se pasaban del 100%.
+        es_cliente = ((sub['Desenlace'] == DES_CLIENTE) |
+                      (sub['Estado'] == 'Ya era cliente'))
+        reales = sub[~es_cliente]
+        d = reales['Desenlace']
+        dias_madurez = int((hoy - b).days)
+        filas.append({
+            'dia': a, 'orden': a,
+            'etiqueta': (f"{_acortar(pd.Series([ev['titulo']]), 34).iloc[0]}"
+                         f"<br><span style='font-size:10px'>"
+                         f"{a:%d/%m}{' · ' + ev['canal'] if ev['canal'] else ''}</span>"),
+            'titulo': ev['titulo'], 'canal': ev['canal'],
+            'Escribieron': len(sub),
+            'Ya eran clientes': int(es_cliente.sum()),
+            NEG_ASESORAMIENTO: int((d == DES_DERIVADO).sum()),
+            NEG_PRODUCTO: int(d.isin([DES_MEMBRESIA, DES_CONSULTORIA]).sum()),
+            'No califica': int((d == DES_NO_CALIFICA).sum()),
+            # Todo lo demás: en proceso, sin etiquetar, o cualquier desenlace que
+            # no sea de los de arriba. Así los cuatro segmentos suman exactamente
+            # los leads reales, sin huecos ni superposición.
+            'Sin resolver aún': int(len(reales) - ((d == DES_DERIVADO).sum()
+                                                   + d.isin([DES_MEMBRESIA, DES_CONSULTORIA]).sum()
+                                                   + (d == DES_NO_CALIFICA).sum())),
+            'dias_madurez': dias_madurez,
+            # Con los lags medidos, a los 14 días ya se resolvió el 91%.
+            'maduro': dias_madurez >= 14,
+        })
+    out = pd.DataFrame(filas)
+    if out.empty:
+        return out
+    out['Leads reales'] = out['Escribieron'] - out['Ya eran clientes']
+    out['Ganados'] = out[NEG_ASESORAMIENTO] + out[NEG_PRODUCTO]
+    out['Conversión %'] = np.where(out['Leads reales'] > 0,
+                                   out['Ganados'] / out['Leads reales'] * 100, np.nan)
+    return out.sort_values('orden')
+
+def fig_mix_por_evento(comp, modo='Cantidad', para_pdf=False):
+    """Barras horizontales apiladas: qué tipo de cliente trajo cada publicación.
+
+    En «Cantidad» se ve el tamaño; en «Mix %» se comparan publicaciones de
+    distinto volumen, que es lo que hace falta para decidir qué contenido
+    repetir. Cada segmento lleva su número escrito.
+    """
+    if comp.empty:
+        return None
+    partes = [NEG_ASESORAMIENTO, NEG_PRODUCTO, 'No califica', 'Sin resolver aún']
+    colores = {NEG_ASESORAMIENTO: NEGOCIO_COLORS[NEG_ASESORAMIENTO],
+               NEG_PRODUCTO: NEGOCIO_COLORS[NEG_PRODUCTO],
+               'No califica': '#D6336C', 'Sin resolver aún': '#C9D2CE'}
+    # plotly dibuja la primera categoría abajo: invertir deja la lista en orden
+    # cronológico leyendo de arriba hacia abajo.
+    c = comp.iloc[::-1]
+    base = c['Leads reales'].replace(0, np.nan)
+    fig = go.Figure()
+    for p in partes:
+        val = c[p] / base * 100 if modo == 'Mix %' else c[p]
+        txt = [(f"{n} · {v:.0f}%" if modo == 'Mix %' else str(int(n))) if n else ''
+               for n, v in zip(c[p], (c[p] / base * 100).fillna(0))]
+        fig.add_trace(go.Bar(
+            y=c['etiqueta'], x=val, name=p, orientation='h',
+            marker=dict(color=colores[p], line=dict(color='#FFFFFF', width=1)),
+            text=txt, textposition='inside', insidetextanchor='middle',
+            textangle=0, textfont=dict(size=12 if para_pdf else 11, color='#FFFFFF'),
+            hovertemplate=f"<b>{p}</b><br>%{{x:.0f}}<extra></extra>"))
+
+    # Total y madurez al final de cada barra: el número que cierra la lectura.
+    tope = (100 if modo == 'Mix %' else c['Leads reales'].max())
+    for y, (_, r) in zip(c['etiqueta'], c.iterrows()):
+        cola = (f"{int(r['Leads reales'])} leads · {r['Conversión %']:.0f}% cierre"
+                if pd.notna(r['Conversión %']) else f"{int(r['Leads reales'])} leads")
+        if not r['maduro']:
+            cola += f"  ⏳ {int(r['dias_madurez'])}d"
+        fig.add_annotation(x=tope * 1.02, y=y, text=cola, showarrow=False,
+                           xanchor='left', font=dict(size=11 if para_pdf else 10,
+                                                     color='#5B6E67'))
+    alto = max(150 + 78 * len(c), 290)
+    fig.update_layout(
+        barmode='stack', height=alto,
+        title=dict(text=("Qué tipo de cliente trajo cada publicación"
+                         + ("" if modo == 'Cantidad' else " · mix comparable")),
+                   font=dict(color='#0F5132', size=19), x=0.01, xanchor='left'),
+        xaxis=dict(title=("% de los leads reales" if modo == 'Mix %' else "Leads reales"),
+                   range=[0, tope * 1.30], showgrid=True, gridcolor='#EEF3F0'),
+        yaxis=dict(title="", tickfont=dict(size=12)),
+        legend=dict(orientation='h', yanchor='top', y=-0.18 - 0.4 / len(c),
+                    xanchor='center', x=0.5, traceorder='normal'),
+        margin=dict(t=85, b=90, l=250, r=40),
+        paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=12),
+        uniformtext=dict(minsize=9, mode='show'))
+    return fig
+
+def fig_embudo_evento(fila, para_pdf=False):
+    """Embudo de una publicación, en el mismo lenguaje que el embudo general:
+    escribieron → leads reales → ganados, con el último escalón partido en los
+    dos negocios. Las pérdidas de cada paso se anotan a la derecha."""
+    if fila is None:
+        return None
+    escr = int(fila['Escribieron']); cli = int(fila['Ya eran clientes'])
+    real = int(fila['Leads reales'])
+    a = int(fila[NEG_ASESORAMIENTO]); p = int(fila[NEG_PRODUCTO])
+    gan = a + p
+    if escr <= 0:
+        return None
+
+    fig = go.Figure()
+    filas = [
+        ("Escribieron", [("Escribieron", escr, COLOR_ETAPA_1)], f"−{cli} ya eran clientes"),
+        ("Leads reales", [("Leads reales", real, COLOR_ETAPA_2)],
+         f"−{real - gan} sin cerrar todavía"),
+        ("Leads ganados", [(NEG_ASESORAMIENTO, a, NEGOCIO_COLORS[NEG_ASESORAMIENTO]),
+                           (NEG_PRODUCTO, p, NEGOCIO_COLORS[NEG_PRODUCTO])], ""),
+    ]
+    vistos = set()
+    for i, (nombre, segs, perdida) in enumerate(filas):
+        ancho = sum(v for _, v, _ in segs)
+        # Espaciador transparente para que cada escalón quede centrado.
+        fig.add_trace(go.Bar(y=[nombre], x=[(escr - ancho) / 2], orientation='h',
+                             marker=dict(color='rgba(0,0,0,0)'), showlegend=False,
+                             hoverinfo='skip'))
+        for et, v, col in segs:
+            fig.add_trace(go.Bar(
+                y=[nombre], x=[v], orientation='h', name=et,
+                marker=dict(color=col, line=dict(color='#FFFFFF', width=1.5)),
+                # Adentro va SOLO el número: «Asesoramiento (broker) 14» no entra
+                # en el segmento y plotly se comía el número, que es el dato. El
+                # nombre lo pone la leyenda.
+                text=[str(v)] if v else [''],
+                textposition='inside', insidetextanchor='middle', textangle=0,
+                textfont=dict(size=14 if para_pdf else 13, color='#FFFFFF'),
+                showlegend=(len(segs) > 1 and et not in vistos),
+                hovertemplate=f"<b>{et}</b><br>%{{x}}<extra></extra>"))
+            vistos.add(et)
+        # Los segmentos chicos no entran: el número se escribe afuera.
+        if len(segs) > 1:
+            x0 = (escr - ancho) / 2
+            for et, v, _ in segs:
+                if 0 < v < escr * 0.07:
+                    fig.add_annotation(x=x0 + v / 2, y=nombre, text=str(v), showarrow=True,
+                                       arrowhead=0, arrowwidth=1, arrowcolor='#5B6E67',
+                                       ax=0, ay=-26, font=dict(size=11, color='#1A252C'))
+                x0 += v
+        if perdida:
+            fig.add_annotation(x=escr * 1.02, y=nombre, text=perdida, showarrow=False,
+                               xanchor='left', font=dict(size=11, color='#8A9A93'))
+        if ancho and i < 2:
+            fig.add_annotation(x=escr / 2, y=nombre, text=str(ancho), showarrow=False,
+                               font=dict(size=14, color='#FFFFFF', family='Inter'))
+        if i == 2:
+            # El total del último escalón va afuera: adentro compite con los dos
+            # números de los segmentos.
+            pct = f" · {gan / real * 100:.0f}% de los leads reales" if real else ""
+            fig.add_annotation(x=escr * 1.02, y=nombre, text=f"{gan} ganados{pct}",
+                               showarrow=False, xanchor='left',
+                               font=dict(size=11, color='#0F5132'))
+
+    fig.update_layout(
+        barmode='stack', height=320,
+        title=dict(text=f"«{fila['titulo']}» · del primer mensaje a la venta",
+                   font=dict(color='#0F5132', size=17), x=0.01, xanchor='left'),
+        xaxis=dict(visible=False, range=[0, escr * 1.30]),
+        yaxis=dict(title="", autorange='reversed', tickfont=dict(size=12)),
+        legend=dict(orientation='h', yanchor='top', y=-0.1, xanchor='center', x=0.5),
+        margin=dict(t=70, b=70, l=110, r=40),
+        paper_bgcolor='#FFFFFF' if para_pdf else 'rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(family='Inter, Segoe UI, sans-serif', color='#1A252C', size=12),
+        uniformtext=dict(minsize=10, mode='show'))
     return fig
 
 def fig_patrimonio_por_asesor(d, para_pdf=False):
@@ -2417,10 +2658,14 @@ conexiones_disponibles = list(
 CONEXION_COLORS = {c: CONEXION_PALETA[i % len(CONEXION_PALETA)]
                    for i, c in enumerate(conexiones_disponibles)}
 
+_vol_conexion = df_raw.groupby('conexion')[COL_ID].nunique()
 conexiones_sel = st.sidebar.multiselect(
     "Conexión (línea de WhatsApp):", conexiones_disponibles, default=conexiones_disponibles,
+    format_func=lambda c: f"{c} ({_vol_conexion.get(c, 0):,})",
     help="Cada línea es un número distinto. Los asesores atienden en las dos, "
-         "así que el filtro sirve para aislar el rendimiento de cada una."
+         "así que el filtro sirve para aislar el rendimiento de cada una. "
+         "Entre paréntesis, cuántas conversaciones tiene cada una: «Sin Conexión» "
+         "con un puñado de chats son filas del export sin connectionId, no una línea real."
 )
 
 asesores_disponibles = sorted(df_raw['user'].dropna().unique())
@@ -3541,9 +3786,17 @@ with tab_com:
                      "piezas de la misma semana no se cuentan los mismos leads. "
                      "7 días cubren el 81% de las conversiones medidas.")
 
-            serie_leads = serie_diaria_leads(leads, hasta=df_cap['createdAt_dt'].max())
-            vent_ev = _ventanas(eventos_df, serie_leads, ventana_dias)
-            serie_leads = linea_base(serie_leads, vent_ev)
+            serie_cruda = serie_diaria_leads(leads, hasta=df_cap['createdAt_dt'].max())
+            eventos_rango, eventos_fuera = eventos_en_rango(eventos_df, serie_cruda)
+            vent_ev = _ventanas(eventos_rango, serie_cruda, ventana_dias)
+            serie_leads = linea_base(serie_cruda.copy(), vent_ev)
+
+            if not eventos_fuera.empty:
+                st.caption(
+                    "Fuera del período con datos, no se pueden atribuir: " +
+                    ", ".join(f"**{t}** ({d:%d/%m/%Y})"
+                              for t, d in zip(eventos_fuera['titulo'], eventos_fuera['dia'])) +
+                    ". Mostrarlas con cero leads se leería como que no funcionaron.")
 
             if eventos_df.empty:
                 st.info(
@@ -3553,13 +3806,19 @@ with tab_com:
                     "el gráfico, con su atribución calculada abajo. El gráfico ya funciona sin "
                     "él: marca los picos por su cuenta.", icon="📅")
 
-            f_ev = fig_leads_con_eventos(serie_leads, eventos_df)
+            f_ev = fig_leads_con_eventos(serie_leads, eventos_rango)
             if f_ev is not None:
                 grafico(f_ev, "Leads por día con publicaciones", "atribucion")
 
             picos = serie_leads[serie_leads['pico']]
             if not picos.empty:
-                sin_marcar = picos[~picos['dia'].isin(eventos_df['dia'])] if not eventos_df.empty else picos
+                # Un pico que cae DENTRO de la ventana de una publicación ya está
+                # explicado: es su arrastre. Avisar por él sería ruido — el video
+                # del 31/10 también levanta el 1 y el 2 de noviembre.
+                explicado = pd.Series(False, index=picos.index)
+                for a, b in vent_ev:
+                    explicado |= picos['dia'].between(a, b)
+                sin_marcar = picos[~explicado]
                 if not sin_marcar.empty:
                     lista = ", ".join(
                         f"**{d:%d/%m}** ({int(n)} leads, esperaba {e:.0f})"
@@ -3568,9 +3827,8 @@ with tab_com:
                         f"Estos días tuvieron un pico que no tiene ninguna publicación cargada: "
                         f"{lista}. Si sabés qué salió esos días, cargalo en el calendario.", icon="🔎")
 
-            if not eventos_df.empty:
-                tabla_atr = atribuir(leads, eventos_df, serie_diaria_leads(
-                    leads, hasta=df_cap['createdAt_dt'].max()), ventana_dias)
+            if not eventos_rango.empty:
+                tabla_atr = atribuir(leads, eventos_rango, serie_cruda.copy(), ventana_dias)
                 if not tabla_atr.empty:
                     st.markdown("###### Cuántos leads le corresponden a cada publicación")
                     st.caption(
@@ -3598,6 +3856,57 @@ with tab_com:
                         "Un lead que entra hoy tarda en resolverse: 50% el mismo día, 81% a los 7 "
                         "días, 91% a los 14. La conversión de las publicaciones más recientes va a "
                         "subir sola con el tiempo; no es que hayan rendido peor.")
+
+                # ---- Qué tipo de cliente trae cada publicación.
+                comp = composicion_por_evento(leads, eventos_rango, serie_cruda.copy(),
+                                              ventana_dias, hoy=df_cap['createdAt_dt'].max())
+                if not comp.empty:
+                    divider()
+                    section_header(
+                        "PERFIL", "Asesoramiento o Producto: Qué Cliente Trae Cada Publicación",
+                        subtitle="Por la misma puerta entran dos negocios distintos. El que se "
+                                 "reasigna a la mesa busca que le manejen la cartera en su broker; "
+                                 "el que compra membresía o consultoría cierra con el comercial y "
+                                 "no pasa a la mesa. Saber cuál trae cada contenido es lo que "
+                                 "permite decidir qué repetir.")
+
+                    modo = st.radio("Cómo mirarlo:", ['Cantidad', 'Mix %'], horizontal=True,
+                                    key="modo_mix_evento",
+                                    help="«Cantidad» muestra el tamaño de cada publicación. "
+                                         "«Mix %» las lleva a la misma escala para comparar "
+                                         "composición entre piezas de distinto alcance.")
+                    f_mix = fig_mix_por_evento(comp, modo=modo)
+                    if f_mix is not None:
+                        grafico(f_mix, "Mix por publicación", "atribucion")
+
+                    inmaduras = comp[~comp['maduro']]
+                    if not inmaduras.empty:
+                        st.info(
+                            "⏳ " + ", ".join(f"**{t}**" for t in inmaduras['titulo']) +
+                            (" tiene " if len(inmaduras) == 1 else " tienen ") +
+                            "menos de 14 días: sus leads todavía se están resolviendo y la franja "
+                            "gris va a bajar sola. Su mix todavía no es comparable contra el de "
+                            "una publicación vieja.")
+
+                    # ---- Embudo de una publicación puntual.
+                    elegida = st.selectbox(
+                        "Ver el embudo de una publicación:", comp['titulo'].tolist(),
+                        index=len(comp) - 1, key="sel_embudo_evento")
+                    fila = comp[comp['titulo'] == elegida].iloc[0]
+                    f_emb = fig_embudo_evento(fila)
+                    if f_emb is not None:
+                        grafico(f_emb, "Embudo del evento", "atribucion")
+                        cli = int(fila['Ya eran clientes'])
+                        a_, p_ = int(fila[NEG_ASESORAMIENTO]), int(fila[NEG_PRODUCTO])
+                        if a_ + p_:
+                            sesgo = ("hacia asesoramiento" if a_ > p_ * 1.5 else
+                                     "hacia producto" if p_ > a_ * 1.5 else "repartido entre los dos")
+                            st.caption(
+                                f"De los {int(fila['Leads reales'])} leads reales que trajo, "
+                                f"cerraron {a_ + p_}: **{a_}** se reasignaron a la mesa y "
+                                f"**{p_}** compraron membresía o consultoría. El perfil está "
+                                f"**{sesgo}**. Además escribieron {cli} personas que ya eran "
+                                "clientes, que no cuentan como captación.")
 
             with st.expander("Cómo se carga el calendario de publicaciones"):
                 st.markdown(
